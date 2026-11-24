@@ -1,4 +1,4 @@
-import { SWEEP_ALARM, checkAll, cleanupDownloads, refreshBadge, sweepDownloads } from "./lib/manager.js";
+import { SWEEP_ALARM, checkAll, handleExtensionInstalled, refreshBadge, sweepDownloads } from "./lib/manager.js";
 
 const ALARM = "check-updates";
 const PERIOD_MINUTES = 6 * 60;
@@ -30,7 +30,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
+// Confirms pending installs (commits record.installed), deletes their CRX copies, refreshes the badge.
 chrome.management.onInstalled.addListener((info) => {
-  cleanupDownloads(info.id).then(refreshBadge);
+  handleExtensionInstalled(info).catch((e) => console.error("[Extainium] confirm install:", e));
 });
 chrome.management.onUninstalled.addListener(() => refreshBadge());

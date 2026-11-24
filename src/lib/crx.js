@@ -146,15 +146,15 @@ export async function extensionIdFromSpki(spki) {
 }
 
 // The ID Chromium assigns: the crx_id of the signed header, which must be
-// the hash of one of the RSA proof keys.
+// the hash of one of the proof keys, RSA or ECDSA (crx_verifier.cc checks both lists).
 export async function extensionIdFromCrx(bytes) {
   const header = parseCrx(bytes);
   if (!header.crxId) throw new Error("extension ID from CRX: no signed crx_id in header");
   const id = extensionIdFromCrxId(header.crxId);
-  for (const p of header.rsa) {
+  for (const p of [...header.rsa, ...header.ecdsa]) {
     if (p.publicKey && (await extensionIdFromSpki(p.publicKey)) === id) return id;
   }
-  throw new Error(`extension ID from CRX: no RSA key in header hashes to crx_id ${id}`);
+  throw new Error(`extension ID from CRX: no key in header hashes to crx_id ${id}`);
 }
 
 export function zipFromCrx(bytes) {

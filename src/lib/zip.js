@@ -3,12 +3,26 @@
 const EOCD_SIG = 0x06054b50;
 const CENTRAL_SIG = 0x02014b50;
 const LOCAL_SIG = 0x04034b50;
+const FLAG_ENCRYPTED = 0x1;
 const FLAG_DATA_DESCRIPTOR = 0x8;
+const FLAG_UTF8 = 0x800;
+
+// CP437, the ZIP default name encoding when the UTF-8 flag is clear (APPNOTE 4.4.4, appendix D).
+const CP437_HIGH =
+  "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u00a0";
+
+function decodeName(bytes, flags) {
+  if (flags & FLAG_UTF8) return new TextDecoder().decode(bytes);
+  let s = "";
+  for (const b of bytes) s += b < 0x80 ? String.fromCharCode(b) : CP437_HIGH[b - 0x80];
+  return s;
+}
 
 import { concatBytes } from "./crx.js";
 
-// Returns entries { name, flags, method, mtime, mdate, crc, compSize, uncompSize, data }
-// where data is the stored (possibly compressed) bytes.
+// Returns entries { name, nameBytes, flags, method, mtime, mdate, crc, compSize, uncompSize, data }
+// where data is the stored (possibly compressed) bytes and name is decoded
+// from nameBytes as UTF-8 (flag bit 11) or CP437.
 export function parseZip(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let eocd = -1;
@@ -21,7 +35,6 @@ export function parseZip(bytes) {
   if (eocd < 0) throw new Error(`parse zip: no end-of-central-directory record in ${bytes.length} bytes`);
   const count = dv.getUint16(eocd + 10, true);
   let p = dv.getUint32(eocd + 16, true);
-  const dec = new TextDecoder();
   const entries = [];
   for (let n = 0; n < count; n++) {
     if (p + 46 > bytes.length || dv.getUint32(p, true) !== CENTRAL_SIG) {
@@ -32,7 +45,9 @@ export function parseZip(bytes) {
     const commentLen = dv.getUint16(p + 32, true);
     const compSize = dv.getUint32(p + 20, true);
     const localOffset = dv.getUint32(p + 42, true);
-    const name = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    const flags = dv.getUint16(p + 8, true);
+    const nameBytes = bytes.slice(p + 46, p + 46 + nameLen);
+    const name = decodeName(nameBytes, flags);
     if (localOffset + 30 > bytes.length || dv.getUint32(localOffset, true) !== LOCAL_SIG) {
       throw new Error(`parse zip: local header for ${name} missing at offset ${localOffset}`);
     }
@@ -40,7 +55,8 @@ export function parseZip(bytes) {
     if (dataStart + compSize > bytes.length) throw new Error(`parse zip: data of ${name} overruns file`);
     entries.push({
       name,
-      flags: dv.getUint16(p + 8, true),
+      nameBytes,
+      flags,
       method: dv.getUint16(p + 10, true),
       mtime: dv.getUint16(p + 12, true),
       mdate: dv.getUint16(p + 14, true),
@@ -55,14 +71,17 @@ export function parseZip(bytes) {
 }
 
 // Writes entries as parsed by parseZip. Sizes and CRC are taken as given.
+// Names are written as their original nameBytes when present (flags kept),
+// else as UTF-8 with the UTF-8 flag set for non-ASCII names.
 export function buildZip(entries) {
   const enc = new TextEncoder();
   const locals = [];
   const central = [];
   let offset = 0;
   for (const e of entries) {
-    const name = enc.encode(e.name);
-    const flags = e.flags & ~FLAG_DATA_DESCRIPTOR;
+    const name = e.nameBytes || enc.encode(e.name);
+    const nonAscii = !e.nameBytes && name.some((b) => b >= 0x80);
+    const flags = (e.flags & ~FLAG_DATA_DESCRIPTOR) | (nonAscii ? FLAG_UTF8 : 0);
     const lh = new Uint8Array(30 + name.length);
     const l = new DataView(lh.buffer);
     l.setUint32(0, LOCAL_SIG, true);
@@ -112,9 +131,44 @@ async function inflateRaw(bytes) {
 }
 
 export async function readEntry(entry) {
+  if (entry.flags & FLAG_ENCRYPTED) throw new Error(`read zip entry ${entry.name}: encrypted entries are not supported`);
   if (entry.method === 0) return entry.data;
-  if (entry.method === 8) return inflateRaw(entry.data);
+  if (entry.method === 8) {
+    try {
+      return await inflateRaw(entry.data);
+    } catch (e) {
+      throw new Error(`read zip entry ${entry.name}: corrupt deflate data (${e.message})`);
+    }
+  }
   throw new Error(`read zip entry ${entry.name}: unsupported compression method ${entry.method}`);
+}
+
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+export function crc32(bytes) {
+  let c = 0xffffffff;
+  for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+const hex32 = (n) => "0x" + n.toString(16).padStart(8, "0");
+
+// Rejects an archive whose entries do not decompress to their declared size and CRC-32.
+export async function verifyZip(entries) {
+  for (const e of entries) {
+    const data = await readEntry(e);
+    if (data.length !== e.uncompSize) {
+      throw new Error(`verify zip: entry "${e.name}" has ${data.length} bytes, its header declares ${e.uncompSize}`);
+    }
+    const crc = crc32(data);
+    if (crc !== e.crc) {
+      throw new Error(`verify zip: entry "${e.name}" CRC-32 is ${hex32(crc)}, its header declares ${hex32(e.crc)}`);
+    }
+  }
 }
 
 export async function readManifest(entries) {
@@ -129,11 +183,13 @@ export async function readManifest(entries) {
   }
 }
 
-// Moves the shallowest folder holding manifest.json to the zip root, as
-// release zips often wrap the extension in a folder.
+// Checks every entry's size and CRC-32, then moves the shallowest folder
+// holding manifest.json to the zip root, as release zips often wrap the
+// extension in a folder. Name bytes and flags are kept as they were.
 // Returns { bytes, manifest }.
 export async function normalizeExtensionZip(bytes) {
   const entries = parseZip(bytes);
+  await verifyZip(entries);
   if (entries.some((e) => e.name === "manifest.json")) {
     return { bytes, manifest: await readManifest(entries) };
   }
@@ -144,8 +200,12 @@ export async function normalizeExtensionZip(bytes) {
     if (prefix === null || candidate.length < prefix.length) prefix = candidate;
   }
   if (prefix === null) throw new Error("normalize extension zip: no manifest.json in any folder");
+  // Strip by bytes: the prefix bytes are those of the manifest's name before "manifest.json".
+  const manifestEntry = entries.find((e) => e.name === prefix + "manifest.json");
+  const prefixBytes = manifestEntry.nameBytes.subarray(0, manifestEntry.nameBytes.length - "manifest.json".length);
+  const startsWith = (b) => b.length > prefixBytes.length && prefixBytes.every((x, i) => b[i] === x);
   const stripped = entries
-    .filter((e) => e.name.startsWith(prefix) && e.name.length > prefix.length)
-    .map((e) => ({ ...e, name: e.name.slice(prefix.length) }));
+    .filter((e) => e.name.startsWith(prefix) && startsWith(e.nameBytes))
+    .map((e) => ({ ...e, name: e.name.slice(prefix.length), nameBytes: e.nameBytes.slice(prefixBytes.length) }));
   return { bytes: buildZip(stripped), manifest: await readManifest(stripped) };
 }

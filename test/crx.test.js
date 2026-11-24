@@ -53,9 +53,25 @@ test("a generated signing key survives PKCS#8 export/import with the same public
   assert.deepEqual(imported.spki, key.spki);
 });
 
+// F7: Chromium's crx_verifier accepts the developer key from an RSA or an ECDSA proof.
+test("an ECDSA-only CRX3, signed independently with node:crypto, yields the ID of its P-256 key", async () => {
+  const ec = nodeCrypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const ecSpki = ec.publicKey.export({ type: "spki", format: "der" });
+  const crxId = nodeCrypto.createHash("sha256").update(ecSpki).digest().subarray(0, 16);
+  const zip = new Uint8Array(readFileSync(new URL("./fixtures/ext-root.zip", import.meta.url)));
+  const signedData = Buffer.concat([Buffer.from([0x0a, 0x10]), crxId]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(signedData.length);
+  const payload = Buffer.concat([Buffer.from("CRX3 SignedData\0", "latin1"), size, signedData, zip]);
+  const signature = nodeCrypto.sign("sha256", payload, ec.privateKey);
+  assert.ok(nodeCrypto.verify("sha256", payload, ec.publicKey, signature));
+  const crx = encodeCrx({ ecdsa: [{ publicKey: new Uint8Array(ecSpki), signature: new Uint8Array(signature) }], crxId: new Uint8Array(crxId) }, zip);
+  assert.equal(await extensionIdFromCrx(crx), referenceId(ecSpki));
+});
+
 test("extensionIdFromCrx rejects a header whose crx_id no key hashes to", async () => {
   const crx = encodeCrx({ rsa: [{ publicKey: new Uint8Array(spkiDer), signature: new Uint8Array(4) }], crxId: new Uint8Array(16) }, new Uint8Array());
-  await assert.rejects(extensionIdFromCrx(crx), /no RSA key in header hashes to crx_id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+  await assert.rejects(extensionIdFromCrx(crx), /no key in header hashes to crx_id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
 });
 
 test("parseCrx rejects non-CRX bytes and a header longer than the file", () => {

@@ -15,11 +15,20 @@ function crxFilename(base) {
 }
 
 // Resolves with the download id once the CRX is downloaded; the browser then
-// shows its "Add extension?" prompt. A failed download is erased.
-export async function installCrx(crxBytes, name) {
+// shows its "Add extension?" prompt. onStarted(id) is awaited as soon as the
+// download id is known, so the caller can track the file before it completes.
+// A failed download rejects; deleting what it left is the caller's job.
+export async function installCrx(crxBytes, name, { onStarted = async () => {} } = {}) {
   const url = URL.createObjectURL(new Blob([crxBytes], { type: CRX_MIME }));
   const filename = crxFilename(name);
-  const id = await chrome.downloads.download({ url, filename });
+  let id;
+  try {
+    id = await chrome.downloads.download({ url, filename });
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    throw new Error(`download ${filename}: ${e.message}`);
+  }
+  await onStarted(id);
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (err) => {
@@ -27,11 +36,8 @@ export async function installCrx(crxBytes, name) {
       settled = true;
       chrome.downloads.onChanged.removeListener(onChanged);
       URL.revokeObjectURL(url);
-      if (!err) return resolve(id);
-      // An interrupted download may have left a partial file.
-      chrome.downloads.removeFile(id).catch(() => {})
-        .then(() => chrome.downloads.erase({ id }))
-        .finally(() => reject(err));
+      if (err) reject(err);
+      else resolve(id);
     };
     const accept = (danger) => {
       if (danger && danger !== "safe" && danger !== "accepted") {

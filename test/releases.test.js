@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  compareVersions, derivePattern, latestFor, matchAssets, parseRepo,
+  compareVersions, deriveTemplate, latestFor, matchAssets, parseRepo,
   selectRelease, simplifyReleases, updateState, versionFromTag,
 } from "../src/lib/releases.js";
 
@@ -60,22 +60,22 @@ test("versionFromTag extracts the version part of common tag styles", () => {
 const asset = (name) => ({ name, url: "https://example.invalid/" + name, size: 1, digest: null });
 const release = (tag, names, extra = {}) => ({ tag, name: tag, prerelease: false, publishedAt: "2026-01-01T00:00:00Z", htmlUrl: "", assets: names.map(asset), ...extra });
 
-test("derivePattern generalizes the version so the same asset is found in later releases", () => {
-  const ublock = derivePattern("uBlock0_1.77.0.chromium.crx", "1.77.0");
+test("deriveTemplate generalizes the version so the same asset is found in later releases", () => {
+  const ublock = deriveTemplate("uBlock0_1.77.0.chromium.crx", "1.77.0");
   const later = release("1.78.0", ["uBlock0_1.78.0.chromium.crx", "uBlock0_1.78.0.chromium.zip", "uBlock0_1.78.0.firefox.signed.xpi"]);
   assert.deepEqual(matchAssets(later, ublock).map((a) => a.name), ["uBlock0_1.78.0.chromium.crx"]);
   const beta = release("1.77.1b3", ["uBlock0_1.77.1b3.chromium.crx", "uBlock0_1.77.1b3.chromium.zip"]);
   assert.deepEqual(matchAssets(beta, ublock).map((a) => a.name), ["uBlock0_1.77.1b3.chromium.crx"]);
 
-  const palette = derivePattern("github-bot-command-palette-v1.2.0.zip", "v1.2.0");
+  const palette = deriveTemplate("github-bot-command-palette-v1.2.0.zip", "v1.2.0");
   const next = release("v1.2.1", ["github-bot-command-palette-v1.2.1.crx", "github-bot-command-palette-v1.2.1.zip", "github-bot-command-palette.crx", "github-bot-command-palette.zip"]);
   assert.deepEqual(matchAssets(next, palette).map((a) => a.name), ["github-bot-command-palette-v1.2.1.zip"]);
 });
 
-test("derivePattern generalizes dotted numbers when the tag version is not in the name, and keeps fixed names literal", () => {
-  const p = derivePattern("ext-2.3.4-chrome.zip", "release-42");
+test("deriveTemplate generalizes dotted numbers when the tag version is not in the name, and keeps fixed names literal", () => {
+  const p = deriveTemplate("ext-2.3.4-chrome.zip", "release-42");
   assert.deepEqual(matchAssets(release("release-43", ["ext-2.4.0-chrome.zip", "ext-2.4.0-firefox.zip"]), p).map((a) => a.name), ["ext-2.4.0-chrome.zip"]);
-  const fixed = derivePattern("extension.zip", "v1.0");
+  const fixed = deriveTemplate("extension.zip", "v1.0");
   assert.deepEqual(matchAssets(release("v2.0", ["extension.zip", "extension.zip.sig", "my-extension.zip"]), fixed).map((a) => a.name), ["extension.zip"]);
 });
 
@@ -96,14 +96,14 @@ test("selectRelease picks the newest release with a matching asset and honors th
     release("1.2b1", ["x-1.2b1.crx"], { publishedAt: "2026-03-01T00:00:00Z", prerelease: true }),
     release("1.1", ["notes.txt"], { publishedAt: "2026-02-01T00:00:00Z" }),
   ];
-  const p = derivePattern("x-1.0.crx", "1.0");
+  const p = deriveTemplate("x-1.0.crx", "1.0");
   assert.equal(selectRelease(releases, p, false).release.tag, "1.0");
   assert.equal(selectRelease(releases, p, true).release.tag, "1.2b1");
-  assert.equal(selectRelease(releases, "^nothing$", true), null);
+  assert.equal(selectRelease(releases, "nothing", true), null);
 });
 
 test("latestFor leaves the asset unset when several assets match", () => {
-  const record = { pattern: "\\.zip$", includePrereleases: false, releases: [release("v1", ["a.zip", "b.zip"])] };
+  const record = { template: "*.zip", includePrereleases: false, releases: [release("v1", ["a.zip", "b.zip"])] };
   const latest = latestFor(record);
   assert.equal(latest.asset, null);
   assert.deepEqual(latest.candidates.map((a) => a.name), ["a.zip", "b.zip"]);
@@ -123,4 +123,16 @@ test("updateState: digest decides when Extainium installed the running version, 
   assert.equal(updateState({ latest, installed: { tag: "1.78.0", digest: "sha256:old", version: "1.78.0" } }, ext("1.78.0")), "update");
   assert.equal(updateState({ latest: { ...latest, asset: asset("n") }, installed: { tag: "1.77.0", digest: null, version: "5" } }, ext("5")), "update");
   assert.equal(updateState({ latest: { tag: "nightly", asset: asset("n") }, installed: null }, ext("5")), "unknown");
+});
+
+// F12: version ordering decides first; a digest difference only marks a rebuild of the same release.
+test("updateState never offers an older release as an update", () => {
+  const ext = { id: "x", version: "2.0.0" };
+  const stable = { tag: "v1.9.0", asset: { ...asset("ext.crx"), digest: "sha256:stable" } };
+  assert.equal(updateState({ latest: stable, installed: { tag: "v2.0.0-beta1", digest: "sha256:beta", version: "2.0.0" } }, ext), "current");
+  assert.equal(updateState({ latest: stable, installed: null }, ext), "current");
+  const beta2 = { tag: "v2.0.0-beta2", asset: { ...asset("ext.crx"), digest: "sha256:beta2" } };
+  assert.equal(updateState({ latest: beta2, installed: { tag: "v2.0.0-beta1", digest: "sha256:beta", version: "2.0.0" } }, ext), "update");
+  const rebuild = { tag: "v2.0.0-beta1", asset: { ...asset("ext.crx"), digest: "sha256:rebuilt" } };
+  assert.equal(updateState({ latest: rebuild, installed: { tag: "v2.0.0-beta1", digest: "sha256:beta", version: "2.0.0" } }, ext), "update");
 });
