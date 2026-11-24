@@ -41,14 +41,18 @@ stays dismissed across updates.
   extension from the **Installed** list: store extensions update from the
   store, extensions with their own update address (uBlock Origin's CRX,
   Extainium itself) from that address. The browser asks once for access to
-  the store's or the update address's host. A store item that the store does
+  the store's or the update address's host, and again for a host that the
+  update address or its download redirects to (Extainium names it; the
+  `webRequest` permission, which shows no extra warning, lets it see where a
+  redirect goes). A store item that the store does
   not offer to this browser (too old a browser, Manifest V2, removed or
   flagged) is shown as not offered. Unmanaged installed extensions can be
   linked to a GitHub repo.
 - **Install from file:** install a local `.crx` or `.zip` and optionally track it
   with a repo afterwards.
 - **Backup:** **Files & settings** > **Export** saves the list and signing keys;
-  **Import** restores it.
+  **Import** restores it. An imported entry for an extension that another
+  entry already follows is skipped, with a note.
 - **Theme:** System, Light or Dark under **Files & settings**.
 - **GitHub token (optional):** raises GitHub's limit from 60 to 5000 API requests
   per hour. A fine-grained token with no permissions is enough for public repos.
@@ -90,7 +94,8 @@ The same hand-off installs on desktop ungoogled-chromium only with
 `chrome://flags/#extension-mime-request-handling` set to "Always prompt for
 install" (then relaunch). Without it the download completes and nothing
 installs; Extainium notices that (the browser deletes the copy at once) and
-says so. ungoogled-chromium does not update extensions by itself, so track
+says so, also when the page that started the install was closed meanwhile
+(the background clean-up checks it). ungoogled-chromium does not update extensions by itself, so track
 store and self-hosted extensions, and Extainium itself, from the
 **Installed** list.
 

@@ -31,13 +31,37 @@ export const JUST_BLACK_CODEBASE = /codebase="([^"]+)"/.exec(REAL_APPS.get(JUST_
 // server's measured limit) and files: { [url]: bytes | text | (url) => Response }.
 // A file URL also matches with a query appended (update checks add x=...).
 // Unmatched requests go to the fetch installed before (fakeGithub's).
+// redirects: { [url]: destination URL } answers a request of url (also with a
+// query appended) with a redirect, as Chromium handles one for an extension
+// (measured in Chromium 156, see the F2 notes in the lib fix report): the
+// extension's chrome.webRequest.onBeforeRedirect reports it a moment later;
+// with redirect: "manual" the answer is an opaque redirect that does not say
+// where; followed, it fails with TypeError "Failed to fetch" unless the
+// extension holds a host permission for the destination, which then answers
+// (response.url and redirected tell).
 // Returns { cwsRequests: [{ url, ids, params }], requests: [url] }.
-export function fakeUpdateServers({ cws = {}, files = {}, status = 200 } = {}) {
+export function fakeUpdateServers({ cws = {}, files = {}, status = 200, redirects = {} } = {}) {
   const prev = globalThis.fetch;
   const log = { cwsRequests: [], requests: [] };
-  globalThis.fetch = async (input, init = {}) => {
+  const matches = (url, k) => url === k || url.startsWith(k + "?") || url.startsWith(k + "&");
+  let requestId = 0;
+  globalThis.fetch = async function serve(input, init = {}, id = String(++requestId)) {
     const url = String(input);
     if (url.startsWith("blob:")) return prev(input, init);
+    const from = Object.keys(redirects).find((k) => matches(url, k));
+    if (from) {
+      log.requests.push(url);
+      const to = redirects[from];
+      const event = globalThis.chrome.webRequest && globalThis.chrome.webRequest.onBeforeRedirect;
+      if (event) setTimeout(() => event.dispatch({ requestId: id, url, redirectUrl: to }), 20);
+      if (init.redirect === "manual") return { type: "opaqueredirect", status: 0, ok: false, redirected: false, url, headers: new Headers() };
+      const u = new URL(to);
+      if (!(await globalThis.chrome.permissions.contains({ origins: [`${u.protocol}//${u.hostname}/*`] }))) throw new TypeError("Failed to fetch");
+      const res = await serve(to, init, id);
+      Object.defineProperty(res, "url", { value: res.url || to });
+      Object.defineProperty(res, "redirected", { value: true });
+      return res;
+    }
     if (url.startsWith("https://clients2.google.com/service/update2/crx?")) {
       const u = new URL(url);
       const xs = u.searchParams.getAll("x").map((x) => Object.fromEntries(new URLSearchParams(x)));

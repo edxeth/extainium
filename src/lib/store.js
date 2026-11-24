@@ -105,6 +105,8 @@ export function newRecord(owner, repo) {
 //   build; size and hash null when the server announced none; codebase null
 //   when a self-hosted server answered "noupdate" for the installed version),
 //   unavailable: { malware } | null  (the server offers no build to this browser),
+//   redirectOrigins: [origin pattern]  (destinations of redirects that failed
+//     for want of a host permission; absent in older records; not in backups),
 //   identityChange: null, checkedAt, error, addedAt }
 export function newSourceRecord(source, id, { updateUrl = null, name = null, installed = null, addedAt = Date.now() } = {}) {
   return {
@@ -116,6 +118,7 @@ export function newSourceRecord(source, id, { updateUrl = null, name = null, ins
     installed,
     latest: null,
     unavailable: null,
+    redirectOrigins: [],
     identityChange: null,
     checkedAt: null,
     error: null,

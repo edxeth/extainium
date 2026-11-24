@@ -111,11 +111,14 @@ export function updateUrlCheckUrl(updateUrl, id, version) {
 const GUPDATE_NS = "http://www.google.com/update2/response";
 const XML_ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
 const NAME = "[A-Za-z_][A-Za-z0-9_.-]*(?::[A-Za-z_][A-Za-z0-9_.-]*)?";
-const START_TAG = new RegExp(`<(${NAME})((?:\\s+${NAME}\\s*=\\s*(?:"[^"<]*"|'[^'<]*'))*)\\s*(/?)>`, "y");
-const END_TAG = new RegExp(`</(${NAME})\\s*>`, "y");
-const ATTRIBUTE = new RegExp(`(${NAME})\\s*=\\s*(?:"([^"<]*)"|'([^'<]*)')`, "g");
+// XML's whitespace (production S): space, tab, CR and LF only. JavaScript's
+// \s also matches no-break and other Unicode spaces, which XML refuses there.
+const S = "[ \\t\\r\\n]";
+const START_TAG = new RegExp(`<(${NAME})((?:${S}+${NAME}${S}*=${S}*(?:"[^"<]*"|'[^'<]*'))*)${S}*(/?)>`, "y");
+const END_TAG = new RegExp(`</(${NAME})${S}*>`, "y");
+const ATTRIBUTE = new RegExp(`(${NAME})${S}*=${S}*(?:"([^"<]*)"|'([^'<]*)')`, "g");
 // The XML declaration: version 1.0, optionally UTF-8 and standalone.
-const XML_DECL = /^<\?xml\s+version\s*=\s*(["'])1\.0\1(?:\s+encoding\s*=\s*(["'])[Uu][Tt][Ff]-8\2)?(?:\s+standalone\s*=\s*(["'])(?:yes|no)\3)?\s*\?>/;
+const XML_DECL = new RegExp(`^<\\?xml${S}+version${S}*=${S}*(["'])1\\.0\\1(?:${S}+encoding${S}*=${S}*(["'])[Uu][Tt][Ff]-8\\2)?(?:${S}+standalone${S}*=${S}*(["'])(?:yes|no)\\3)?${S}*\\?>`);
 // A character outside XML 1.0's Char production.
 const NOT_XML_CHAR = /[^\t\n\r\u0020-\ud7ff\ue000-\ufffd\u{10000}-\u{10ffff}]/u;
 // The children each element may have; any other element is refused.
@@ -156,7 +159,7 @@ export function parseUpdateManifest(text) {
   const stack = []; // open elements { name, attrs, children }
   let root = null;
   let pos = 0;
-  if (/^<\?xml[\s?]/.test(src)) {
+  if (/^<\?xml[ \t\n?]/.test(src)) {
     const decl = XML_DECL.exec(src);
     if (!decl) throw fail(`not a well-formed XML 1.0 UTF-8 declaration: ${JSON.stringify(src.slice(0, Math.max(src.indexOf("?>") + 2, 0) || 60))}`);
     pos = decl[0].length;
@@ -186,7 +189,8 @@ export function parseUpdateManifest(text) {
       const m = START_TAG.exec(src);
       if (!m) throw fail(`truncated or malformed tag at offset ${pos}: ${JSON.stringify(src.slice(pos, pos + 20))}`);
       const [, name, rawAttrs, selfClosing] = m;
-      const attrs = {};
+      // No prototype: "__proto__" and the like are attribute names like any other.
+      const attrs = Object.create(null);
       for (const [, n, v1, v2] of rawAttrs.matchAll(ATTRIBUTE)) {
         if (Object.hasOwn(attrs, n)) throw fail(`attribute ${n} appears twice on <${name}> at offset ${pos}`);
         attrs[n] = decode(v1 ?? v2, pos);

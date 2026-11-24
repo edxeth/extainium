@@ -198,7 +198,7 @@ const ours = (doc) => {
       assert.deepEqual([uc.status, uc.codebase, uc.version, uc.size, uc.hash, uc.malware],
         [a.status ?? null, a.codebase ?? null, a.version ?? null, a.size ?? null, a.hash_sha256 ?? null, a._malware === "true"]);
     }
-    return { appid, status, uc: uc && uc.attrs };
+    return { appid, status, uc: uc && { ...uc.attrs } };
   });
 };
 
@@ -263,7 +263,7 @@ test("property: every proper prefix of a generated document that cuts off its ro
 // Differential: a single edit (insert, delete or replace one character) of a
 // valid document; whatever the parser accepts, expat accepts with the same content.
 test("property: a document the parser accepts after a random edit is one expat reads the same", async () => {
-  const edit = fc.tuple(docArb, fc.nat(), fc.constantFrom("delete", "insert", "replace"), fc.constantFrom("<", ">", "/", '"', "'", "=", "&", ";", " ", "a", "-", "!", "?", ":", "#", "x", "\u0000"));
+  const edit = fc.tuple(docArb, fc.nat(), fc.constantFrom("delete", "insert", "replace"), fc.constantFrom("<", ">", "/", '"', "'", "=", "&", ";", " ", "a", "-", "!", "?", ":", "#", "x", "\u0000", "\u00a0", "\u3000"));
   await fc.assert(fc.asyncProperty(edit, async ([d, at, kind, ch]) => {
     const doc = docXml(d);
     const i = at % (doc.length + 1);
@@ -281,6 +281,73 @@ test("property: a document the parser accepts after a random edit is one expat r
     assert.equal(ref.protocol, "2.0");
     assert.deepEqual(mine, ref.apps);
   }), { numRuns: 600 });
+});
+
+// Review F3: XML's whitespace (S) is space, tab, CR and LF only; JavaScript's
+// \s also matches these characters, which XML allows in text but not between
+// the parts of a tag or declaration.
+const NOT_XML_SPACE = ["\u00a0", "\u1680", "\u2000", "\u2009", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff"];
+// Offsets of the whitespace between the parts of tags and declarations:
+// inside <...>, outside attribute values and comments.
+function markupSpaces(doc) {
+  const at = [];
+  let quote = null;
+  let inTag = false;
+  for (let i = 0; i < doc.length; i++) {
+    const c = doc[i];
+    if (!inTag) {
+      if (doc.startsWith("<!--", i)) i = doc.indexOf("-->", i) + 2;
+      else if (c === "<") inTag = true;
+    } else if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === ">") inTag = false;
+    else if (c === " " || c === "\t" || c === "\n" || c === "\r") at.push(i);
+  }
+  return at;
+}
+
+test("property: a tag or declaration with a non-XML whitespace character between its parts is refused, as by expat", async () => {
+  const input = fc.tuple(docArb, fc.nat(), fc.constantFrom(...NOT_XML_SPACE));
+  await fc.assert(fc.asyncProperty(input, async ([d, n, ch]) => {
+    const doc = docXml(d);
+    const spaces = markupSpaces(doc);
+    const i = spaces[n % spaces.length]; // every document has one inside <gupdate ...>
+    const changed = doc.slice(0, i) + ch + doc.slice(i + 1);
+    const ref = await expat(changed);
+    assert.equal(ref.ok, false, `expat accepts ${JSON.stringify(changed)}`);
+    assert.throws(() => parseUpdateManifest(changed), /^Error: parse update manifest: /, JSON.stringify(changed));
+  }), { numRuns: 300 });
+});
+
+// Review F3: attribute names are compared as names, "__proto__" and the other
+// names of Object.prototype included: an attribute written twice is refused,
+// one written once is read like any other.
+const ATTR_NAMES = ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf", "isPrototypeOf", "x", "fp"];
+const insertAttrs = (doc, tagIndex, attrs) => {
+  const starts = [...doc.matchAll(/<(gupdate|daystart|app|updatecheck)(?=[\s/>])/g)].map((m) => m.index + m[0].length);
+  const at = starts[tagIndex % starts.length];
+  return doc.slice(0, at) + attrs + doc.slice(at);
+};
+
+test("property: an attribute written twice on a tag is refused, as by expat, whatever its name", async () => {
+  const input = fc.tuple(docArb, fc.nat(), fc.constantFrom(...ATTR_NAMES), fc.constantFrom('"', "'"));
+  await fc.assert(fc.asyncProperty(input, async ([d, t, name, q]) => {
+    const changed = insertAttrs(docXml(d), t, ` ${name}=${q}a${q} ${name}=${q}b${q}`);
+    const ref = await expat(changed);
+    assert.equal(ref.ok, false, `expat accepts ${JSON.stringify(changed)}`);
+    assert.throws(() => parseUpdateManifest(changed), /^Error: parse update manifest: attribute \S+ appears twice/, JSON.stringify(changed));
+  }), { numRuns: 300 });
+});
+
+test("property: an extra attribute named like a property of Object.prototype is read as expat reads it", async () => {
+  const input = fc.tuple(docArb, fc.nat(), fc.constantFrom(...ATTR_NAMES), attrValue);
+  await fc.assert(fc.asyncProperty(input, async ([d, t, name, value]) => {
+    const changed = insertAttrs(docXml(d), t, serializeAttrs([[name, value]], '"', " "));
+    const ref = await expat(changed);
+    if (!ref.ok) return; // the tag already had this attribute (fp on an updatecheck)
+    assert.deepEqual(ours(changed), ref.apps, JSON.stringify(changed));
+  }), { numRuns: 300 });
 });
 
 // ---- request URLs ----
