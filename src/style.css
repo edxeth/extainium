@@ -20,10 +20,8 @@
   --err-tint: color-mix(in oklab, var(--err) 14%, var(--surface));
   --shadow-card: light-dark(0 1px 2px oklch(0.25 0.03 258 / 0.08), 0 0 0 transparent);
   --shadow-sheet: 0 -8px 32px oklch(0.15 0.03 258 / 0.25);
-  --shadow-toast: 0 8px 24px oklch(0.15 0.03 258 / 0.3);
   --scrim: oklch(0.15 0.02 258 / 0.45);
   --img-outline: light-dark(oklch(0 0 0 / 0.1), oklch(1 0 0 / 0.1));
-  --on-err: light-dark(oklch(0.99 0.005 27), oklch(0.2 0.05 27));
 
   --fs-xs: 0.8125rem;
   --fs-sm: 0.875rem;
@@ -48,12 +46,15 @@
 [hidden] { display: none !important; }
 *, *::before, *::after { box-sizing: border-box; }
 
-/* --toast-space: height of the visible toast plus its gaps (set by options.js), so focus
-   scrolling and the page end keep controls clear of it. */
+/* --appbar-h: the sticky header's height (set by options.js; it grows with the status
+   strip), so focus scrolling keeps controls clear of it. */
 html {
   -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-font-smoothing: antialiased;
-  scroll-padding-block: 128px var(--toast-space, 0px);
+  scroll-padding-block-start: calc(var(--appbar-h, 112px) + 16px);
 }
+/* First open with no cached theme: theme-boot.js hides the page until theme.js has read
+   the stored theme (or a short timeout passed), so it never paints in the wrong scheme. */
+:root[data-theme-pending] body { visibility: hidden; }
 
 body {
   margin: 0;
@@ -161,7 +162,7 @@ button.danger:not(:disabled):active { background: color-mix(in oklab, var(--err)
 .options main {
   max-inline-size: 720px;
   margin-inline: auto;
-  padding: 16px var(--pad) calc(max(96px, var(--toast-space, 0px) + 16px) + env(safe-area-inset-bottom));
+  padding: 16px var(--pad) calc(32px + env(safe-area-inset-bottom));
 }
 
 .appbar {
@@ -282,6 +283,11 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .versions dt { font-size: var(--fs-xs); color: var(--muted); }
 .versions dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .versions dd .sub { display: block; font-weight: 400; font-size: var(--fs-sm); color: var(--muted); }
+/* 44px tap target; the negative margins keep the tile's line height and width. */
+.versions .notes {
+  display: inline-flex; align-items: center; justify-content: center; vertical-align: top;
+  min-block-size: var(--tap); min-inline-size: var(--tap); margin: -12px -6px; padding-inline: 6px;
+}
 .state-update .versions .latest dd { color: var(--accent); }
 
 /* Progress and pending lines: neutral, so the accent tint keeps meaning "update available". */
@@ -397,25 +403,29 @@ button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant
 }
 html:has(.sheet[open]) { overflow: hidden; }
 
-/* ---- toast ---- */
-.toast {
-  position: fixed; z-index: 20; inset-inline: 12px; inset-block-end: calc(12px + env(safe-area-inset-bottom));
-  max-inline-size: 560px; margin-inline: auto;
-  display: flex; align-items: flex-start; gap: 4px;
-  background: var(--fg); color: var(--bg); border-radius: var(--r-md);
-  padding: 4px 4px 4px 16px; box-shadow: var(--shadow-toast);
+/* ---- messages ---- */
+/* Header status strip: in the sticky header, so it pushes the page down instead of covering
+   it. Empty, it keeps its live regions in the accessibility tree at zero height. */
+.status-strip:not(.show) { block-size: 0; overflow: clip; }
+.status-strip.show { border-block-start: 1px solid var(--line); background: var(--surface-2); }
+.status-strip.show.is-error { background: var(--err-tint); }
+.status-inner {
+  max-inline-size: 720px; margin-inline: auto; display: flex; align-items: flex-start; gap: 4px;
+  /* Physical sides: safe-area insets are physical. */
+  padding-left: max(var(--pad), env(safe-area-inset-left, 0px));
+  padding-right: max(4px, env(safe-area-inset-right, 0px));
 }
-/* Hidden by opacity, not display, so its live regions stay in place. */
-.toast:not(.show) { opacity: 0; transform: translateY(8px); pointer-events: none; }
-.toast .message { flex: 1; padding-block: 10px; overflow-wrap: anywhere; font-size: var(--fs-sm); max-block-size: 40dvh; overflow: auto; }
-.toast .message p { white-space: pre-wrap; }
-.toast .detail { display: block; margin-block-start: 4px; font-size: var(--fs-xs); color: inherit; opacity: 0.85; }
-.toast.is-error { background: var(--err); color: var(--on-err); }
-.toast button.ghost { color: inherit; }
-@media (hover: hover) and (pointer: fine) { .toast button.ghost:hover { background: color-mix(in oklab, currentColor 14%, transparent); color: inherit; } }
-.toast { transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out); }
-@media (prefers-reduced-motion: reduce) {
-  .toast { transition-property: opacity; }
-  .toast:not(.show) { transform: none; }
+.status-strip .message {
+  /* 12px + half of the 20px line = 22px: the first line centres on the 44px Dismiss button. */
+  flex: 1; min-inline-size: 0; padding-block: 12px; font-size: var(--fs-sm); line-height: 20px;
+  overflow-wrap: anywhere; max-block-size: 30dvh; overflow: auto;
 }
+.status-strip .message p { white-space: pre-wrap; }
+.status-strip.is-error .message { color: var(--err); }
+.status-strip .detail { display: block; margin-block-start: 4px; font-size: var(--fs-xs); color: var(--muted); }
 
+/* Inline status line under the control that raised it. */
+.inline-status { font-size: var(--fs-sm); color: var(--fg); overflow-wrap: anywhere; }
+.inline-status:empty { display: none; }
+.inline-status.error { background: var(--err-tint); color: var(--err); border-radius: var(--r-md); padding: 8px 12px; }
+.add .inline-status, #tokenForm .inline-status, .subgroup .inline-status { margin-block-start: 8px; }

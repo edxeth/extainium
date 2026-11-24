@@ -19,6 +19,19 @@
       <button class="tab" role="tab" id="tabList" aria-controls="panelList" aria-selected="true">Extensions</button>
       <button class="tab" role="tab" id="tabTools" aria-controls="panelTools" aria-selected="false" tabindex="-1">Files &amp; settings</button>
     </nav>
+    <!-- Messages that belong to no one control (Check all, Remove). Part of the sticky
+         header, so it pushes the page down instead of covering it. -->
+    <div id="status" class="status-strip">
+      <div class="status-inner">
+      <div class="message">
+        <p id="message" role="status"></p>
+        <p id="messageAlert" role="alert"></p>
+      </div>
+      <button id="messageClose" class="btn ghost icon" aria-label="Dismiss message" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      </div>
+    </div>
   </header>
 
   <main>
@@ -26,9 +39,10 @@
       <form id="addForm" class="add">
         <label for="addInput" class="label">Track a GitHub repository</label>
         <div class="field">
-          <input type="text" id="addInput" placeholder="owner/repo or URL" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="go" required>
+          <input type="text" id="addInput" aria-describedby="addStatus" placeholder="owner/repo or URL" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="go" required>
           <button class="btn primary">Add</button>
         </div>
+        <p id="addStatus" class="inline-status"></p>
       </form>
       <p id="checkInfo" class="meta"></p>
 
@@ -51,6 +65,7 @@
         <select id="fileKey"><option value="">a new key</option></select>
         <p class="hint">Signing with a tracked repo's key installs the .zip as that repo's extension, with the same ID and data.</p>
         <button id="fileInstall" class="btn primary">Install file</button>
+        <p id="fileStatus" class="inline-status"></p>
         <div id="fileTrack" class="subgroup" hidden>
           <p id="fileResult" class="hint"></p>
           <form id="fileTrackForm">
@@ -59,6 +74,7 @@
               <input type="text" id="fileTrackInput" placeholder="owner/repo" autocapitalize="off" autocomplete="off" spellcheck="false" required>
               <button class="btn">Track</button>
             </div>
+            <p id="trackStatus" class="inline-status"></p>
           </form>
         </div>
       </section>
@@ -71,6 +87,7 @@
             <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
             <button class="btn">Save</button>
           </div>
+          <p id="tokenStatus" class="inline-status"></p>
         </form>
         <p class="hint">Raises the API limit from 60 to 5000 requests per hour. Kept in this browser and sent only to api.github.com. A fine-grained token with no permissions is enough for public repos.</p>
         <p id="rateInfo" class="meta"></p>
@@ -84,6 +101,7 @@
           <button id="import" class="btn">Import</button>
           <input type="file" id="importInput" accept=".json,application/json" hidden>
         </div>
+        <p id="backupStatus" class="inline-status"></p>
         <div id="importResult" class="import-result" role="status"></div>
       </section>
 
@@ -94,6 +112,7 @@
           <option value="light">Light</option>
           <option value="dark">Dark</option>
         </select>
+        <p id="themeStatus" class="inline-status"></p>
       </section>
     </div>
   </main>
@@ -113,16 +132,6 @@
 
   <div id="announce" class="visually-hidden" role="status"></div>
   <div id="announceAlert" class="visually-hidden" role="alert"></div>
-
-  <div id="toast" class="toast">
-    <div class="message">
-      <p id="message" role="status"></p>
-      <p id="messageAlert" role="alert"></p>
-    </div>
-    <button id="messageClose" class="btn ghost icon" aria-label="Dismiss message" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-    </button>
-  </div>
 
   <script type="module" src="options.js"></script>
 </body>

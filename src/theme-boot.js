@@ -4,9 +4,10 @@
 // theme.js reads chrome.storage afterwards and corrects the copy if it is stale.
 (() => {
   const root = document.documentElement;
+  const raw = localStorage.getItem("extainium.theme");
   let saved = {};
   try {
-    saved = JSON.parse(localStorage.getItem("extainium.theme") || "{}");
+    saved = JSON.parse(raw || "{}");
   } catch {
     // A damaged copy: theme.js rewrites it from chrome.storage.
   }
@@ -16,4 +17,11 @@
   root.dataset.theme = saved.theme === "light" || saved.theme === "dark"
     ? saved.theme
     : (root.dataset.page === "popup" && saved.observedScheme) || own;
+  // No copy yet (first open after an update): the guess above may be the wrong scheme.
+  // Keep the page hidden until theme.js has applied the stored theme; the timeout makes
+  // sure it never stays blank.
+  if (!raw) {
+    root.dataset.themePending = "";
+    setTimeout(() => delete root.dataset.themePending, 300);
+  }
 })();

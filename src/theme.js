@@ -17,6 +17,7 @@ const ownScheme = () => (dark.matches ? "dark" : "light");
 function apply(prefs, observe) {
   const scheme = prefs.theme !== "system" ? prefs.theme : (!observe && prefs.observedScheme) || ownScheme();
   document.documentElement.dataset.theme = scheme;
+  delete document.documentElement.dataset.themePending; // set by theme-boot.js on a first open
   localStorage.setItem(CACHE, JSON.stringify(prefs));
 }
 

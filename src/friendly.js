@@ -19,10 +19,15 @@ const RULES = [
   [/^parse repo:/, () =>
     "Enter a repository as owner/repo or a github.com URL, for example gorhill/uBlock."],
   [/^(?:add repo|track \S+): (\S+) is already tracked/, (m) => `${m[1]} is already tracked.`],
-  // manager.js: an earlier install of the same version still waits for the browser
-  [/was handed to the browser at .* is not confirmed; answer its prompt, or try again after (.+)$/, (m) =>
-    `The browser still has an install prompt open for this version. Answer it, or try again after ${m[1]}.`],
+  // manager.js: the repo was removed while its install or key ran
+  [/^(?:install|sign) (\S+): the repo is no longer tracked/, (m) =>
+    `${m[1]} is no longer tracked, so nothing was installed. Add it again to install it.`],
+  // manager.js installFile with a file key that is gone (e.g. moved to a tracked repo meanwhile)
+  [/^install .*: no file key is stored for extension (\S+)/, (m) =>
+    `The key of extension ${m[1]} is no longer stored. Choose the key again: once that extension is tracked, its key is listed under its repo.`],
   [/signing key was replaced meanwhile; try again/, () => "The signing key changed while this ran. Try again."],
+  // manager.js saveBackup: the browser refused to start the download
+  [/^save backup /, () => "The backup was not saved: the browser did not start the download. Tap Export to try again."],
   // store.js backup (before the template rule: a backup can carry a bad template)
   [/^import backup|^backup /, () =>
     "This file is not an Extainium backup, or it is damaged. Choose a file made with Export."],
@@ -40,6 +45,10 @@ const RULES = [
     "That repo has no signing key yet. Sign the file with a new key instead."],
   [/^track \S+: a different signing key/, () =>
     "This repo already has another signing key, so the file cannot be tracked with it. Install the file again, signed with that repo's key."],
+  // crx.js verifyCrx: the CRX's signature does not check out (before the download rule,
+  // which keeps GitHub's digest check)
+  [/^verify (?!zip:).*?: (?:the header has no signed crx_id|the signed crx_id has|an? (?:RSA|ECDSA) proof lacks|the key of (?:RSA|ECDSA) proof|the (?:RSA|ECDSA) signature of key|no proof's key derives)/, () =>
+    "The file's signature does not check out: it may be damaged or tampered with, so it was not installed. Download it again, or ask its author."],
   // github.js getBytes / verify, install.js downloads
   [/^download |^accept download|download of .* interrupted|download #\d+ of .* vanished|^verify (?!zip)/, (m, ctx) =>
     `The download or its check failed. Tap ${ctx.retry || "Update"} to retry.`],

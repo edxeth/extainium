@@ -1,6 +1,7 @@
 import {
-  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, exportBackup, importBackup,
-  installFile, installRelease, refreshBadge, removeRepo, setPrereleases, setTemplate, trackInstalledFile, trackedView,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, fileKeysView,
+  importBackup, installFile, installRelease, refreshBadge, removeRepo, saveBackup, setPrereleases, setTemplate,
+  trackInstalledFile, trackedView,
 } from "./lib/manager.js";
 import { getRepo, getSettings, setSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
@@ -20,48 +21,44 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
-// Global toast. Results stay 6 s, errors 15 s (both longer while the tab is hidden), so an
-// error never keeps covering the controls under it; card errors stay on their cards.
-// #message (status) and #messageAlert (alert) are persistent live regions; the
-// toast hides by opacity, so they stay in the accessibility tree.
-let messageTimer = 0;
-// While the toast shows, --toast-space pads the page end and the scroll padding by its
-// height, so every control can be scrolled clear of it (and focus scrolling keeps clear).
-const toast = $("toast");
-function reserveToastSpace() {
-  const on = toast.classList.contains("show");
-  const gap = 24; // 12px below the toast + 12px above it
-  document.documentElement.style.setProperty("--toast-space", on ? `${Math.ceil(toast.offsetHeight) + gap}px` : "0px");
-}
-new ResizeObserver(reserveToastSpace).observe(toast);
-// The control the user just used must not sit under the toast it caused.
-function keepFocusClear() {
-  const el = document.activeElement;
-  if (!el || el === document.body || !toast.classList.contains("show")) return;
-  if (el.getBoundingClientRect().bottom > toast.getBoundingClientRect().top) el.scrollIntoView({ block: "nearest" });
-}
-let toastOrigin = null; // focused when the toast appeared; Dismiss returns focus there
+// Messages never float over the page. Each one shows in the flow, next to what raised it:
+// - an inline status line under the control (Add, Install file, Track, token, Backup, Theme);
+// - the card's own error line for a card action;
+// - the status strip in the sticky header for results that belong to no control
+//   (Check all, a removed repo). It pushes the page down rather than covering it.
+// Messages stay until the next action in the same place (or Dismiss in the strip): nothing
+// covers a control any more, so nothing has to go away on a timer, and a strip that
+// collapsed on a timer would move the page under the user's finger.
+// #message (status) and #messageAlert (alert) are persistent live regions; inline lines
+// and card errors are announced through #announce / #announceAlert.
+let stripOrigin = null; // focused when the strip message appeared; Dismiss returns focus there
 function showMessage(text, isError = false, detail = "") {
-  clearTimeout(messageTimer);
   const on = !!text;
-  toastOrigin = on ? document.activeElement : null;
-  toast.classList.toggle("show", on);
-  reserveToastSpace();
-  if (on) requestAnimationFrame(keepFocusClear);
-  $("toast").classList.toggle("is-error", on && isError);
+  stripOrigin = on ? document.activeElement : null;
+  $("status").classList.toggle("show", on);
+  $("status").classList.toggle("is-error", on && isError);
   $("messageClose").hidden = !on;
   $("message").replaceChildren(...(on && !isError ? [text] : []));
   $("messageAlert").replaceChildren(...(on && isError ? [text, detail ? h("span", { className: "detail" }, detail) : ""] : []));
-  if (text) {
-    const hide = () => (document.hidden ? (messageTimer = setTimeout(hide, 2000)) : showMessage(""));
-    messageTimer = setTimeout(hide, isError ? 15000 : 6000);
-  }
 }
 $("messageClose").addEventListener("click", () => {
-  const back = toastOrigin;
+  const back = stripOrigin;
   showMessage("");
   if (back && back.isConnected && back !== document.body) back.focus({ preventScroll: true });
 });
+
+// Inline status line: slot is the id of a .inline-status element under the control.
+function say(slot, text, isError = false, detail = "") {
+  const el = $(slot);
+  el.classList.toggle("error", !!text && isError);
+  el.replaceChildren(...(text ? [text, isError && detail && detail !== text ? h("span", { className: "detail" }, detail) : ""] : []));
+  if (text) announce(text, isError);
+}
+
+// The sticky header's height (it grows with the strip) keeps focus scrolling clear of it.
+new ResizeObserver(([e]) =>
+  document.documentElement.style.setProperty("--appbar-h", `${Math.ceil(e.target.getBoundingClientRect().height)}px`)
+).observe(document.querySelector(".appbar"));
 
 // ---- tabs ----
 const tabs = [$("tabList"), $("tabTools")];
@@ -74,20 +71,14 @@ function selectTab(tab, focus = false) {
   }
   if (focus) tab.focus();
 }
-// A toast belongs to the tab it came from; switching tabs dismisses it, so it never
-// covers the other tab's controls.
-function switchTab(tab, focus) {
-  if (tab.getAttribute("aria-selected") !== "true") showMessage("");
-  selectTab(tab, focus);
-}
 for (const t of tabs) {
-  t.addEventListener("click", () => switchTab(t));
+  t.addEventListener("click", () => selectTab(t));
   t.addEventListener("keydown", (e) => {
     const i = tabs.indexOf(t);
     const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
     if (to === undefined) return;
     e.preventDefault();
-    switchTab(tabs[(to + tabs.length) % tabs.length], true);
+    selectTab(tabs[(to + tabs.length) % tabs.length], true);
   });
 }
 
@@ -133,21 +124,33 @@ function ctlOf(el) {
   return card && el.dataset.ctl ? { key: card.dataset.key, ctl: el.dataset.ctl } : null;
 }
 
-// Runs a UI action: marks the button busy, reports errors, re-renders.
-async function act(button, fn) {
+// Runs a UI action: marks the button busy, reports its result where it belongs, re-renders.
+// where: the id of an inline status line, { card: key } for a card's own error line, or
+// omitted for the header strip. A card action's result text goes to the strip (its card
+// may be gone, e.g. after Remove).
+async function act(button, fn, where) {
   if (button) setBusy(button, true);
   focusMemo = ctlOf(button || document.activeElement);
-  showMessage("");
+  const inline = typeof where === "string" ? where : null;
+  const cardKey = where && where.card;
+  if (inline) say(inline, "");
+  else if (cardKey) clearCardError(cardKey);
+  else showMessage("");
   $("pickerError").replaceChildren();
   try {
     const msg = await fn();
-    if (msg) showMessage(msg);
+    if (msg && inline) say(inline, msg);
+    else if (msg) showMessage(msg);
   } catch (e) {
     console.error(e);
     const f = friendly(e);
-    // The open sheet is modal: the toast would sit behind it, inert. Show the error in the sheet.
+    // The open sheet is modal: anything outside it is inert. Show the error in the sheet.
     if ($("pickerSection").open) $("pickerError").replaceChildren(f.text, h("span", { className: "detail" }, f.detail));
-    else showMessage(f.text, true, f.detail);
+    else if (inline) say(inline, f.text, true, f.detail);
+    else if (cardKey) {
+      cardStatus.set(cardKey, { error: f });
+      announce(f.text, true);
+    } else showMessage(f.text, true, f.detail);
   } finally {
     if (button) setBusy(button, false);
     await render();
@@ -199,6 +202,10 @@ async function cardAct(key, fn, retry) {
   }
   await render();
   focusMemo = null;
+}
+
+function clearCardError(key) {
+  if (cardStatus.has(key) && !cardStatus.get(key).busy) cardStatus.delete(key);
 }
 
 // Choices typed or picked on a card, kept across renders: key -> value.
@@ -363,7 +370,7 @@ function card(v) {
     ? h("dd", {}, latest.tag,
         h("span", { className: "sub" },
           formatDate(latest.release.publishedAt), latest.release.prerelease ? " · pre-release" : "", " · ",
-          h("a", { href: latest.release.htmlUrl, target: "_blank", rel: "noopener", "data-ctl": "notes", "aria-label": `notes for ${title} ${latest.tag}` }, "notes")))
+          h("a", { className: "notes", href: latest.release.htmlUrl, target: "_blank", rel: "noopener", "data-ctl": "notes", "aria-label": `notes for ${title} ${latest.tag}` }, "notes")))
     : h("dd", {}, "—", h("span", { className: "sub" },
         !record.releases ? "No release data yet" : record.template ? "No release matches the template" : "No asset chosen"));
 
@@ -383,7 +390,10 @@ function card(v) {
     h("div", { className: "more" },
       h("div", { className: "card-actions" },
         h("button", { "data-ctl": "choose", "aria-label": `Choose asset for ${title}`, onclick: () => openPicker(key) }, "Choose asset"),
-        h("button", { "data-ctl": "check", "aria-label": `Check ${title}`, onclick: (e) => act(e.currentTarget, () => checkRepo(key).then(refreshBadge)) }, "Check")),
+        h("button", { "data-ctl": "check", "aria-label": `Check ${title}`, onclick: (e) => act(e.currentTarget, () => checkRepo(key).then(refreshBadge).catch((err) => {
+          // checkRepo stores the error on the record, so the card's check-error line shows it.
+          announce(friendly(err, { retry: "Check" }).text, true);
+        }), { card: key }) }, "Check")),
       h("form", {
         onsubmit: (e) => {
           e.preventDefault();
@@ -401,7 +411,7 @@ function card(v) {
           h("button", { "data-ctl": "save", "aria-label": `Save template for ${title}` }, "Save")),
         h("p", { className: "hint field-hint", id: `template-hint-${key}` }, "Use {version} for the version and * for any text.")),
       h("label", { className: "switch" },
-        h("input", { type: "checkbox", "data-ctl": "pre", checked: record.includePrereleases, onchange: (e) => act(null, () => setPrereleases(key, e.target.checked)) }),
+        h("input", { type: "checkbox", "data-ctl": "pre", checked: record.includePrereleases, onchange: (e) => act(null, () => setPrereleases(key, e.target.checked), { card: key }) }),
         h("span", {}, "Include pre-releases")),
       identity ? null : olderReleases(key, record, title),
       h("dl", { className: "facts" },
@@ -423,7 +433,7 @@ function card(v) {
       h("div", { className: "latest" }, h("dt", {}, "Latest"), latestDd)),
     state === "ambiguous"
       ? h("div", { className: "candidates" }, h("p", { className: "meta" }, "Several assets match. Pick the one to install:"),
-          latest.candidates.map((a) => h("button", { className: "asset", "data-ctl": `asset-${a.name}`, onclick: (e) => act(e.currentTarget, () => chooseAsset(key, a.name, latest.tag)) },
+          latest.candidates.map((a) => h("button", { className: "asset", "data-ctl": `asset-${a.name}`, onclick: (e) => act(e.currentTarget, () => chooseAsset(key, a.name, latest.tag), { card: key }) },
             h("span", { className: "name" }, extOf(a.name) ? h("span", { className: "kind" }, extOf(a.name)) : null, a.name),
             h("span", { className: "muted" }, formatSize(a.size)))))
       : null,
@@ -470,7 +480,7 @@ function olderReleases(key, record, title) {
 function removeText(uninstall, hasKey) {
   if (uninstall) {
     return hasKey
-      ? "Remove uninstalls the extension and deletes its signing key. Installing it again later gives it a new ID and none of its data."
+      ? "Remove uninstalls the extension. Its signing key is deleted once no install waiting at the browser prompt uses it, within about 2 minutes. Installing it again later gives it a new ID and none of its data."
       : "Remove uninstalls the extension and stops tracking the repo.";
   }
   return hasKey
@@ -525,7 +535,7 @@ function removeControls(key, record, hasKey, name, title) {
         await removeRepo(key, uninstall.checked);
         uninstallChoice.delete(key);
         return `Removed ${name}.`;
-      });
+      }, { card: key });
     },
   });
   sync();
@@ -547,30 +557,29 @@ function render() {
 let graceTimer = 0;
 let rateTimer = 0;
 
-// Resolves with { state, error } once download id is complete or interrupted.
-function downloadEnd(id) {
-  return new Promise((resolve) => {
-    const done = (item) => {
-      if (item.state !== "complete" && item.state !== "interrupted") return false;
-      chrome.downloads.onChanged.removeListener(onChanged);
-      resolve({ state: item.state, error: item.error });
-      return true;
-    };
-    const onChanged = (d) => {
-      if (d.id !== id || !d.state) return;
-      done({ state: d.state.current, error: d.error && d.error.current });
-    };
-    chrome.downloads.onChanged.addListener(onChanged);
-    // It may have ended before the listener was added.
-    chrome.downloads.search({ id }).then(([item]) => item && done(item));
-  });
-}
 function scheduleGrace(view) {
   clearTimeout(graceTimer);
   const due = view
     .filter((v) => v.pendingInstall && isWaiting(v.pendingInstall))
     .map((v) => v.pendingInstall.at + PENDING_GRACE_MS - Date.now());
   if (due.length) graceTimer = setTimeout(render, Math.max(0, Math.min(...due)) + 50);
+}
+
+// "Sign a .zip with the key of": a new key, a tracked repo's key, or the key of an
+// extension installed from a file without a repo. The choice survives re-renders
+// while it is still listed.
+function renderKeyChoice(view, fileKeys) {
+  const select = $("fileKey");
+  const chosen = select.value;
+  const repoKeys = view.filter((v) => v.hasKey).map((v) => h("option", { value: v.key }, `${v.record.owner}/${v.record.repo}`));
+  const files = fileKeys.map((f) => h("option", { value: f.value },
+    f.name ? `${f.name} ${f.version} · ${f.extensionId}` : `Not installed · ${f.extensionId}`));
+  select.replaceChildren(
+    h("option", { value: "" }, "a new key"),
+    ...(repoKeys.length ? [files.length ? h("optgroup", { label: "Tracked repos" }, repoKeys) : repoKeys] : []),
+    ...(files.length ? [h("optgroup", { label: "Installed from a file" }, files)] : [])
+  );
+  select.value = [...select.options].some((o) => o.value === chosen) ? chosen : "";
 }
 
 async function renderNow() {
@@ -590,14 +599,7 @@ async function renderNow() {
   const updates = view.filter((v) => v.state === "update").length;
   $("updateCount").hidden = !updates;
   $("updateCount").textContent = plural(updates, "update", "updates");
-  // Keep the user's choice across storage-driven re-renders.
-  const chosenKey = $("fileKey").value;
-  const keyed = view.filter((v) => v.hasKey);
-  $("fileKey").replaceChildren(
-    h("option", { value: "" }, "a new key"),
-    ...keyed.map((v) => h("option", { value: v.key }, v.key))
-  );
-  if (keyed.some((v) => v.key === chosenKey)) $("fileKey").value = chosenKey;
+  renderKeyChoice(view, await fileKeysView());
   const { lastCheck, rateLimit } = await chrome.storage.local.get(["lastCheck", "rateLimit"]);
   $("checkInfo").textContent = lastCheck
     ? `Last checked ${new Date(lastCheck.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
@@ -640,7 +642,7 @@ $("addForm").addEventListener("submit", (e) => {
     const key = await addRepo($("addInput").value);
     $("addInput").value = "";
     queuePicker(key, $("addInput"));
-  });
+  }, "addStatus");
 });
 
 let fileResult = null;
@@ -648,15 +650,18 @@ $("fileInstall").addEventListener("click", (e) =>
   act(e.currentTarget, async () => {
     const file = $("fileInput").files[0];
     if (!file) {
-      showMessage("Choose a .crx or .zip file first.", true);
+      say("fileStatus", "Choose a .crx or .zip file first.", true);
       return;
     }
     const signWith = $("fileKey").value || null;
-    fileResult = await installFile(new Uint8Array(await file.arrayBuffer()), file.name, signWith);
-    $("fileTrack").hidden = !!fileResult.repoKey; // a CRX is never attached to the selected repo
-    $("fileResult").textContent = `${fileResult.name} ${fileResult.installed.version} → ID ${fileResult.extensionId}.`;
+    const res = await installFile(new Uint8Array(await file.arrayBuffer()), file.name, signWith);
+    // A zip installed without a repo keeps its key in the file-key store; tracking takes it
+    // from there, so the page does not hold on to the private key.
+    fileResult = res.repoKey ? res : { ...res, keyPkcs8: null };
+    $("fileTrack").hidden = !!res.repoKey; // a CRX is never attached to the selected repo
+    $("fileResult").textContent = `${res.name} ${res.installed.version} → ID ${res.extensionId}.`;
     return "Confirm the browser prompt to add the extension.";
-  })
+  }, "fileStatus")
 );
 
 $("fileTrackForm").addEventListener("submit", (e) => {
@@ -666,42 +671,35 @@ $("fileTrackForm").addEventListener("submit", (e) => {
     $("fileTrack").hidden = true;
     $("fileTrackInput").value = "";
     queuePicker(key, $("fileInstall"));
-    return `Tracking ${key}. Choose the release asset to follow.`;
-  });
+    // The Track form is gone now: the result shows under Install file.
+    say("fileStatus", `Tracking ${key}. Choose the release asset to follow.`);
+  }, "trackStatus");
 });
 
 getSettings().then((s) => ($("token").value = s.githubToken));
 
 startTheme({ observe: true }).then((theme) => ($("theme").value = theme));
-$("theme").addEventListener("change", (e) => act(null, () => setTheme(e.target.value)));
+$("theme").addEventListener("change", (e) => act(null, () => setTheme(e.target.value), "themeStatus"));
 $("tokenForm").addEventListener("submit", (e) => {
   e.preventDefault();
   act(e.submitter, async () => {
     await setSettings({ githubToken: $("token").value.trim() });
     return "Token saved.";
-  });
+  }, "tokenStatus");
 });
 
 $("export").addEventListener("click", (e) =>
   act(e.currentTarget, async () => {
-    const url = URL.createObjectURL(new Blob([await exportBackup()], { type: "application/json" }));
     const day = new Date().toISOString().slice(0, 10);
-    try {
-      // The browser may first ask where to save: report only once the file is written.
-      const id = await chrome.downloads.download({ url, filename: `extainium-backup-${day}.json` });
-      const { state, error } = await downloadEnd(id);
-      if (state !== "complete") {
-        showMessage("The backup was not saved. Tap Export to try again.", true, `download #${id}: ${error || state}`);
-        return;
-      }
-    } catch (err) {
-      showMessage("The backup was not saved. Tap Export to try again.", true, err.message);
+    // Resolves once the file is written, or with the reason it was not (the browser may
+    // first ask where to save). A failure to start the download throws.
+    const { saved, error } = await saveBackup(`extainium-backup-${day}.json`);
+    if (!saved) {
+      say("backupStatus", "The backup was not saved. Tap Export to try again.", true, error);
       return;
-    } finally {
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
     return "Backup saved to Downloads. It contains signing keys.";
-  })
+  }, "backupStatus")
 );
 $("import").addEventListener("click", () => $("importInput").click());
 $("importInput").addEventListener("change", (e) =>
@@ -711,12 +709,12 @@ $("importInput").addEventListener("change", (e) =>
     if (!file) return;
     $("importResult").replaceChildren();
     const res = await importBackup(await file.text());
-    await showImportResult(res); // shown under the Import button, so no toast
-  })
+    await showImportResult(res); // shown under the Import button
+  }, "backupStatus")
 );
 
 // Conflicts, warnings and check errors of the last import stay under Backup
-// until the next import; the toast only says how many repos came in.
+// until the next import.
 async function showImportResult({ count, errors, conflicts, warnings }) {
   // Conflicts carry the lowercase storage key; show owner/repo as written.
   const names = new Map((await trackedView()).map((v) => [v.key, `${v.record.owner}/${v.record.repo}`]));
