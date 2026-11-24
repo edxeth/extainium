@@ -80,8 +80,8 @@ async function idOfKey(pkcs8) {
 
 // The host permissions a record needs: the CWS hosts, or a self-hosted
 // record's update URL host and the host of the build it announced last; and
-// the destinations of redirects that failed for want of a permission
-// (record.redirectOrigins, see rememberOrigins).
+// the destinations of the redirect that made its last fetch fail for want of
+// a permission (record.redirectOrigins, see rememberOrigins).
 function neededOrigins(record) {
   const redirects = record.redirectOrigins || [];
   if (record.source === "cws") return [...CWS_ORIGINS, ...redirects];
@@ -89,12 +89,13 @@ function neededOrigins(record) {
   return [originOf(record.updateUrl), ...(record.latest && record.latest.codebase ? [originOf(record.latest.codebase)] : []), ...redirects];
 }
 
-// Adds the origins a failed redirect needs (error.neededOrigins, net.js) to
-// record key's redirectOrigins, so the view asks for them (needsOrigins).
-function rememberOrigins(key, error) {
-  const origins = error && error.neededOrigins;
-  if (!origins || !origins.length) return null;
-  return updateRepo(key, (r) => ({ ...r, redirectOrigins: [...new Set([...(r.redirectOrigins || []), ...origins])] }));
+// Sets record key's redirectOrigins to the origins its last fetch needs, so
+// the view asks for those only (needsOrigins): a fetchFrom failure's
+// error.neededOrigins (net.js), [] after a fetch that answered. They are
+// replaced, never added to, so an origin an earlier redirect needed is not
+// asked for once the server stops redirecting there.
+function rememberOrigins(key, origins) {
+  return updateRepo(key, (r) => ({ ...r, redirectOrigins: origins }));
 }
 
 // state of a CWS or update-URL record: "not-offered" (its server offers no
@@ -365,26 +366,7 @@ function feedCovers(record, feed, now) {
 // unless the repo's releases.atom feed (not rate-limited) covers the release
 // selected last time (feedCovers). The feed is read before the API, so a
 // release published in between shows as a newer entry next time.
-export const checkRepo = operation(async (key) => {
-  try {
-    return await checkRepoNow(key);
-  } finally {
-    await syncLastCheckErrors();
-  }
-});
-
-// lastCheck { at, updates, errors } (written by checkAll) with errors set to
-// the records' current check errors, so a card's own check, an install's
-// re-check or a removal that fixed or dropped one shows in "Last checked …"
-// at once; at and updates stay checkAll's. Nothing before the first checkAll.
-async function syncLastCheckErrors() {
-  await withStateLock(async () => {
-    const { lastCheck } = await chrome.storage.local.get("lastCheck");
-    if (!lastCheck) return;
-    const errors = (await listRepos()).map((r) => r.error).filter(Boolean);
-    await chrome.storage.local.set({ lastCheck: { ...lastCheck, errors } });
-  });
-}
+export const checkRepo = operation(checkRepoNow);
 
 async function checkRepoNow(key) {
   const record = await getRepo(key);
@@ -420,7 +402,9 @@ async function checkRepoNow(key) {
   });
 }
 
-// Checks every repo; one failure does not stop the others. Returns { updates, errors }.
+// Checks every repo; one failure does not stop the others. Returns { updates,
+// errors }. Stores lastCheck { at, updates }; the errors stay on the records
+// (record.error), from which the UI counts them (ui-logic.js checkErrorCount).
 export const checkAll = operation(checkAllNow);
 
 async function checkAllNow() {
@@ -437,7 +421,7 @@ async function checkAllNow() {
     if (error) errors.push(error);
   }
   const updates = await refreshBadge();
-  await chrome.storage.local.set({ lastCheck: { at: Date.now(), updates, errors } });
+  await chrome.storage.local.set({ lastCheck: { at: Date.now(), updates } });
   return { updates, errors };
 }
 
@@ -449,11 +433,12 @@ const CHECK_FETCH = { credentials: "omit", cache: "no-store" };
 // none is offered. installedVersion: the version the request named (v=), for
 // which "noupdate" means "up to date"; null when it named 0.0.0.0.
 function applyUpdatecheck(key, result, checkedAt, installedVersion) {
-  if (result.kind === "update") return patchRepo(key, { latest: result.latest, unavailable: null, error: null, checkedAt });
+  const done = { error: null, checkedAt, redirectOrigins: [] };
+  if (result.kind === "update") return patchRepo(key, { latest: result.latest, unavailable: null, ...done });
   if (installedVersion) {
-    return patchRepo(key, { latest: { version: installedVersion, codebase: null, size: null, hash: null }, unavailable: null, error: null, checkedAt });
+    return patchRepo(key, { latest: { version: installedVersion, codebase: null, size: null, hash: null }, unavailable: null, ...done });
   }
-  return patchRepo(key, { latest: null, unavailable: { malware: result.malware }, error: null, checkedAt });
+  return patchRepo(key, { latest: null, unavailable: { malware: result.malware }, ...done });
 }
 
 // Checks CWS and update-URL records: all CWS records in batched requests
@@ -463,12 +448,15 @@ function applyUpdatecheck(key, result, checkedAt, installedVersion) {
 async function checkSourcesNow(records) {
   const results = new Map();
   const checkedAt = Date.now();
-  // e: the failure; its neededOrigins (a redirect's destination) are remembered.
-  const fail = async (key, e) => {
+  // e: the failure; fetched: the update server answered. The origins a
+  // fetch failure names (e.neededOrigins), or none after an answer, replace
+  // the remembered ones; a failure before any fetch leaves them.
+  const fail = async (key, e, fetched = false) => {
     const error = `check ${key}: ${e.message}`;
     results.set(key, error);
     await patchRepo(key, { error, checkedAt });
-    await rememberOrigins(key, e);
+    const origins = e.neededOrigins || (fetched ? [] : null);
+    if (origins) await rememberOrigins(key, origins);
   };
   const cws = records.filter((r) => r.source === "cws");
   if (cws.length) {
@@ -480,8 +468,11 @@ async function checkSourcesNow(records) {
       for (const batch of cwsCheckBatches(cws.map((r) => r.id), version)) {
         let apps = null;
         let batchError = null;
+        let fetched = false;
         try {
-          apps = parseUpdateManifest(await (await fetchFrom(batch.url, CHECK_FETCH)).text()).apps;
+          const res = await fetchFrom(batch.url, CHECK_FETCH);
+          fetched = true;
+          apps = parseUpdateManifest(await res.text()).apps;
           const extra = apps.find((a) => !batch.ids.includes(a.appid));
           if (extra) throw new Error(`the update server's answer lists extension ${JSON.stringify(extra.appid)}, which was not asked for`);
         } catch (e) {
@@ -496,7 +487,7 @@ async function checkSourcesNow(records) {
             await applyUpdatecheck(key, readUpdatecheck(app, { needHashAndSize: true }), checkedAt, null);
             results.set(key, null);
           } catch (e) {
-            await fail(key, e);
+            await fail(key, e, fetched);
           }
         }
       }
@@ -504,19 +495,22 @@ async function checkSourcesNow(records) {
   }
   for (const record of records.filter((r) => r.source === "updateUrl")) {
     const key = repoKey(record);
+    let fetched = false;
     try {
       const missing = await missingOriginsOf([originOf(record.updateUrl)]);
       if (missing.length) throw new Error(`no host permission for ${missing.join(", ")}`);
       const ext = (await installedExtensions()).get(record.id);
       const version = ext ? ext.version : null;
       const url = updateUrlCheckUrl(record.updateUrl, record.id, version || "0.0.0.0");
-      const { apps } = parseUpdateManifest(await (await fetchFrom(url, CHECK_FETCH)).text());
+      const res = await fetchFrom(url, CHECK_FETCH);
+      fetched = true;
+      const { apps } = parseUpdateManifest(await res.text());
       const app = apps.find((a) => a.appid === record.id);
       if (!app) throw new Error(`${new URL(record.updateUrl).host} lists no update for this extension`);
       await applyUpdatecheck(key, readUpdatecheck(app), checkedAt, version);
       results.set(key, null);
     } catch (e) {
-      await fail(key, e);
+      await fail(key, e, fetched);
     }
   }
   return results;
@@ -544,7 +538,6 @@ async function addSourceRecordNow(record, what) {
       const r = await findRepo(key);
       if (r && !(await missingOriginsOf(neededOrigins(r))).length) await removeRepoRecord(key);
     });
-    await syncLastCheckErrors();
     await refreshBadge();
     throw e;
   }
@@ -897,11 +890,14 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
 // being its download (downloads.search, after a search started the browser's
 // file check, as in retryDeletes): the copy gone while the install is still
 // unconfirmed means the installer refused it, so installBlocked is recorded
-// (see environment). A confirmed install or a vanished download item ends the
-// candidate; a copy still present leaves it for a later judgement. Returns the entry.
+// (see environment). A confirmed install, a vanished download item, or any
+// install confirmed after the candidate's download completed (installWorkedAt:
+// installs work, newer evidence than the candidate's) ends the candidate; a
+// copy still present leaves it for a later judgement. Returns the entry.
 async function judgeRefusal(e, item) {
   if (!e.refusalCandidate) return e;
-  if (e.confirmedAt || !item) return { ...e, refusalCandidate: false };
+  const { installWorkedAt = 0 } = await chrome.storage.local.get("installWorkedAt");
+  if (e.confirmedAt || !item || promptTime(e) <= installWorkedAt) return { ...e, refusalCandidate: false };
   if (item.exists !== false) return e;
   await chrome.storage.local.set({ installBlocked: { at: promptTime(e), hint: "flag" } });
   return { ...e, refusalCandidate: false };
@@ -950,7 +946,9 @@ export async function handleExtensionInstalled(info) {
       if (e !== newest && flying.includes(e)) continue; // its prompt is yet to come
       if (e === newest) {
         e = { ...e, confirmedAt: now, signedWith: null };
-        await chrome.storage.local.remove("installBlocked"); // installs work now
+        // Installs work now: no older refusal candidate may report otherwise (judgeRefusal).
+        await chrome.storage.local.remove("installBlocked");
+        await chrome.storage.local.set({ installWorkedAt: now });
         const record = e.repoKey && (await findRepo(e.repoKey));
         if (record && record.extensionId === info.id) await putRepo({ ...record, installed: e.installed });
       } else {
@@ -975,17 +973,21 @@ export async function handleExtensionInstalled(info) {
 // longer listed counts as ended now). It also judges refusal candidates
 // (judgeRefusal) before their copies are deleted, so installBlocked does not
 // depend on the hand-off's page staying open; a download whose end the sweep
-// finds becomes a candidate when it completed at once on desktop.
+// finds becomes a candidate when it completed at once on desktop. The platform
+// and the candidates are decided under the lock, on the entries read there
+// (an entry may have changed since the snapshot taken before it); the
+// browser's file check is started before the lock for the entries seen then,
+// and a candidate whose copy still shows waits for the next sweep.
 export async function sweepDownloads(now = Date.now()) {
   await ready();
-  const pending = (await listInstalls()).filter((e) => !e.fileGone && e.downloadId !== null && !e.confirmedAt);
-  const needsFlag = pending.some((e) => !e.downloadDone) && (await installNeedsFlag());
-  if (pending.some((e) => e.refusalCandidate) || needsFlag) {
+  const pending = (await listInstalls()).filter((e) => !e.fileGone && !e.confirmedAt && (e.downloadId !== null || !e.downloadDone));
+  if (pending.some((e) => e.refusalCandidate) || (pending.some((e) => !e.downloadDone) && (await installNeedsFlag()))) {
     // Starts the browser's file check, so the searches below see a deleted copy.
     await chrome.downloads.search({});
     await sleep(cleanupTiming.settleMs);
   }
   await withStateLock(async () => {
+    let needsFlag = null; // installNeedsFlag(), read once when an entry's end is found
     for (let e of await listInstalls()) {
       // A pending install of a repo that is no longer tracked.
       if (e.repoKey && !(await findRepo(e.repoKey))) e = detached(e);
@@ -1007,7 +1009,7 @@ export async function sweepDownloads(now = Date.now()) {
         failed = !!item && item.state === "interrupted";
         if (failed) e = { ...e, version: null, signedWith: null }; // installs nothing
         e = { ...e, downloadDone: true, promptAt: e.promptAt ?? now };
-        if (needsFlag && !e.confirmedAt && item && completedAtOnce(item)) e.refusalCandidate = true;
+        if (!e.confirmedAt && item && completedAtOnce(item) && (needsFlag ??= await installNeedsFlag())) e.refusalCandidate = true;
       }
       if (e.refusalCandidate && !e.fileGone) {
         const [item] = await chrome.downloads.search({ id: e.downloadId });
@@ -1077,11 +1079,7 @@ export const installRelease = operation(async (key, tag, onProgress = () => {}) 
   const record = await getRepo(key);
   if (sourceOf(record) !== "github") {
     if (tag) throw new Error(`install ${key}: not a GitHub repo, so there is no release ${tag}`);
-    try {
-      return await installSourceNow(key, onProgress);
-    } finally {
-      await syncLastCheckErrors(); // the install checks again
-    }
+    return installSourceNow(key, onProgress);
   }
   if (record.identityChange) throw identityError(key, record);
   let release;
@@ -1135,7 +1133,7 @@ async function installSourceNow(key, onProgress) {
   try {
     bytes = new Uint8Array(await (await fetchFrom(latest.codebase)).arrayBuffer());
   } catch (e) {
-    await rememberOrigins(key, e);
+    await rememberOrigins(key, e.neededOrigins || []);
     throw new Error(`download ${key} ${latest.version}: ${e.message}`);
   }
   if (latest.size !== null && bytes.length !== latest.size) {
@@ -1355,7 +1353,6 @@ export const removeRepo = operation(async (key, uninstall) => {
       await deleteReleasedKeys();
     }
   });
-  await syncLastCheckErrors();
   await refreshBadge();
 });
 
@@ -1430,33 +1427,34 @@ export async function saveBackup(filename) {
 // Imports a backup (validated as a whole first). A stored signing key is never
 // replaced: a backup key that differs is reported in conflicts and the current
 // key, ID and installation stay. Tracked repos take the backup's template and
-// pre-release setting. A key lives in one place: a backup key that is already
-// another repo's key is not imported (a warning says so), a stored file key
-// that the backup brings as a repo key moves to that repo, and backup file
-// keys are added unless the key is a stored repo key. One record follows an
-// extension ID (as in addSourceRecordNow): a backup record of an ID that an
-// existing or earlier imported record follows is skipped with a warning.
+// pre-release setting. One record follows an extension ID (as in
+// addSourceRecordNow): a backup record of an ID that an existing or earlier
+// imported record follows is skipped with a warning. Which records are
+// imported is decided first, before any key moves. A key lives in one place:
+// a backup key that is already another repo's key is not imported (a warning
+// says so), a stored file key that the backup brings as the key of an
+// imported repo moves to that repo, and backup file keys are added unless the
+// key is a stored repo key. The key of a skipped record stays where it is; one
+// stored nowhere becomes the file key of its extension, so it stays usable.
 // Returns { count (records imported), errors, conflicts: [{ key, keptId, backupId }], warnings }.
 export const importBackup = operation(async (text) => {
   const { repos, keys, fileKeys, warnings } = await parseBackup(text);
   const conflicts = [];
   let count = 0;
   await withStateLock(async () => {
+    // A stored key that differs from the backup's decides the repo's ID.
+    const keptIds = new Map();
     for (const [k, b64] of Object.entries(keys)) {
-      const owner = Object.entries(await listSigningKeys()).find(([o, v]) => v === b64 && o !== k);
-      if (owner) {
-        warnings.push(`${k}: the backup's signing key is already the key of ${owner[0]}; it was not imported for ${k}`);
-        continue;
-      }
-      const kept = await putSigningKeyIfAbsent(k, b64);
-      if (kept !== b64) conflicts.push({ key: k, keptId: await idOfKey(kept), backupId: await idOfKey(b64) });
+      const stored = await getSigningKey(k);
+      if (stored && stored !== b64) keptIds.set(k, { keptId: await idOfKey(stored), backupId: await idOfKey(b64) });
     }
-    const repoKeys = new Set(Object.values(await listSigningKeys()));
-    for (const [id, b64] of Object.entries(await listFileKeys())) if (repoKeys.has(b64)) await removeFileKey(id);
-    for (const [id, b64] of Object.entries(fileKeys)) if (!repoKeys.has(b64)) await putFileKeyIfAbsent(id, b64);
+    // The records to write (by key), and the keys of the backup records skipped.
+    const existing = new Map((await listRepos()).map((r) => [repoKey(r), r]));
+    const writes = new Map();
+    const skipped = new Set();
     for (const rec of repos) {
       const k = repoKey(rec);
-      const current = await findRepo(k);
+      const current = existing.get(k) || null;
       let next;
       if (sourceOf(rec) !== "github") {
         if (current) {
@@ -1465,24 +1463,46 @@ export const importBackup = operation(async (text) => {
         }
         next = rec;
       } else {
-        const conflict = conflicts.find((c) => c.key === k);
+        const kept = keptIds.get(k);
         const base = current || { ...rec, extensionId: null, installed: null };
         next = {
           ...base,
           template: rec.template,
           includePrereleases: rec.includePrereleases,
-          extensionId: base.extensionId ?? (conflict ? conflict.keptId : rec.extensionId),
-          installed: base.installed ?? (conflict ? null : rec.installed),
+          extensionId: base.extensionId ?? (kept ? kept.keptId : rec.extensionId),
+          installed: base.installed ?? (kept ? null : rec.installed),
         };
       }
-      const other = next.extensionId && (await listRepos()).find((r) => r.extensionId === next.extensionId && repoKey(r) !== k);
+      const records = new Map([...existing, ...writes]);
+      const other = next.extensionId && [...records.values()].find((r) => r.extensionId === next.extensionId && repoKey(r) !== k);
       if (other) {
         warnings.push(`${k}: extension ${next.extensionId} is already tracked as ${repoKey(other)}; ${k} was not imported`);
+        skipped.add(k);
         continue;
       }
-      await putRepo(next);
+      writes.set(k, next);
       count++;
     }
+    for (const [k, b64] of Object.entries(keys)) {
+      if (skipped.has(k) && !writes.has(k)) {
+        const stored = [...Object.values(await listSigningKeys()), ...Object.values(await listFileKeys())];
+        if (stored.includes(b64)) continue; // stays where it is
+        const id = await idOfKey(b64);
+        if ((await putFileKeyIfAbsent(id, b64)) !== b64) warnings.push(`${k}: extension ${id} already has another file key; the backup's key of ${k} was not imported`);
+        continue;
+      }
+      const owner = Object.entries(await listSigningKeys()).find(([o, v]) => v === b64 && o !== k);
+      if (owner) {
+        warnings.push(`${k}: the backup's signing key is already the key of ${owner[0]}; it was not imported for ${k}`);
+        continue;
+      }
+      const kept = await putSigningKeyIfAbsent(k, b64);
+      if (kept !== b64) conflicts.push({ key: k, ...keptIds.get(k) });
+    }
+    const repoKeys = new Set(Object.values(await listSigningKeys()));
+    for (const [id, b64] of Object.entries(await listFileKeys())) if (repoKeys.has(b64)) await removeFileKey(id);
+    for (const [id, b64] of Object.entries(fileKeys)) if (!repoKeys.has(b64)) await putFileKeyIfAbsent(id, b64);
+    for (const next of writes.values()) await putRepo(next);
   });
   // The backup has no release cache; fetch it so the list shows versions again.
   const { errors } = await checkAllNow();

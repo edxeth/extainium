@@ -5,6 +5,8 @@
 const hostOf = (origin) => origin.replace(/^[a-z]+:\/\//, "").replace(/\/\*?$/, "");
 // The store's hosts read as "the Chrome Web Store"; another update server by its host name.
 const serverName = (host) => (/(?:^|\.)(?:google\.com|googleusercontent\.com)$/.test(host) ? "the Chrome Web Store" : host);
+// serverName at the start of a sentence.
+const ServerName = (host) => serverName(host).replace(/^the /, "The ");
 
 const RULES = [
   // github.js: RateLimitError
@@ -16,7 +18,7 @@ const RULES = [
     "GitHub rejected the token. Replace or clear it under Files & settings."],
   [/^fetch \S+ releases: HTTP (\d+)/, (m) =>
     `GitHub did not answer the request (HTTP ${m[1]}). Try again later.`],
-  // manager.js fetchFrom: "check <key>: cannot reach <host> (<fetch error>)", also inside install and download.
+  // net.js fetchFrom: "check <key>: cannot reach <host> (<fetch error>)", also inside install and download.
   [/(?:^|: )(?:check|download) (?:cws|url):\S+(?: \S+)?: cannot reach (\S+) \(/, (m) =>
     `Cannot reach ${serverName(m[1])}. Check the connection, then try again.`],
   // fetch() itself: offline, DNS, blocked. Names the server when the message says which.
@@ -33,11 +35,11 @@ const RULES = [
     `Extainium was not allowed to reach ${m[1]}, so nothing changed. Try again and choose Allow.`],
   // net.js fetchFrom: the server redirects somewhere Extainium may not go.
   [/(\S+) redirects to a host the browser does not name; there is no host permission for/, (m) =>
-    `${serverName(m[1])} forwards to another site this browser does not name. Allow Extainium to reach all sites when the browser asks, then check again.`],
+    `${ServerName(m[1])} forwards to another site this browser does not name. Allow Extainium to reach all sites when the browser asks, then check again.`],
   [/(\S+) redirects to (\S+), and there is no host permission for (\S+(?:, \S+)*)$/, (m) =>
-    `${serverName(m[1])} forwards to ${m[2]}. Allow Extainium to reach ${m[3].split(", ").map(hostOf).join(" and ")} when the browser asks, then check again.`],
+    `${ServerName(m[1])} forwards to ${m[2]}. Allow Extainium to reach ${m[3].split(", ").map(hostOf).join(" and ")} when the browser asks, then check again.`],
   [/(\S+) redirects to (\S+), which is not an https URL/, (m) =>
-    `${serverName(m[1])} forwards to an address that is not https, so Extainium does not follow it.`],
+    `${ServerName(m[1])} forwards to an address that is not https, so Extainium does not follow it.`],
   // check or install without the host permission (e.g. a record restored from a backup).
   [/: no host permission for (\S+(?:, \S+)*)$/, (m) =>
     `Extainium needs access to ${m[1].split(", ").map(hostOf).join(" and ")}, so nothing was checked or installed. Try again and choose Allow when the browser asks.`],
@@ -48,7 +50,7 @@ const RULES = [
     "An extension ID has exactly 32 letters from a to p. Check the ID, or paste the store link instead."],
   // the update server is down or refuses
   [/(?:^|: )check (?:cws|url):\S+: HTTP (\d+) from (\S+)/, (m) =>
-    `${serverName(m[2])} did not answer (HTTP ${m[1]}). Try again later.`],
+    `${ServerName(m[2])} did not answer (HTTP ${m[1]}). Try again later.`],
   [/^download (?:cws|url):\S+ \S+: HTTP (\d+) from (\S+)/, (m, ctx) =>
     `The download from ${serverName(m[2])} failed (HTTP ${m[1]}). Tap ${ctx.retry || "Update"} to retry.`],
   // store answers about the extension itself
@@ -71,7 +73,7 @@ const RULES = [
   [/^install (?:cws|url):\S+: (?:downloaded \d+ bytes, the update server announced|the download's sha256 \S+ does not match)/, (m, ctx) =>
     `The download was incomplete or changed on the way, so it was not installed. Tap ${ctx.retry || "Update"} to retry.`],
   [/^install (?:cws|url):\S+: the download from (\S+) is not a CRX file/, (m) =>
-    `${serverName(m[1])} sent something that is not an extension file, so nothing was installed. Try again later.`],
+    `${ServerName(m[1])} sent something that is not an extension file, so nothing was installed. Try again later.`],
   [/no proof is signed with Google's publisher key|publisher proof/, () =>
     "This file is not signed by the Chrome Web Store, so it was not installed."],
   [/^install (?:cws|url):\S+: the CRX installs as extension \S+, not as/, () =>

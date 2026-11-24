@@ -38,9 +38,11 @@ export const JUST_BLACK_CODEBASE = /codebase="([^"]+)"/.exec(REAL_APPS.get(JUST_
 // with redirect: "manual" the answer is an opaque redirect that does not say
 // where; followed, it fails with TypeError "Failed to fetch" unless the
 // extension holds a host permission for the destination, which then answers
-// (response.url and redirected tell).
+// (response.url and redirected tell). cors: destination URLs that answer with
+// Access-Control-Allow-Origin: *, which Chromium follows without a host
+// permission, also to http (measured in Chromium 156, closure review F10).
 // Returns { cwsRequests: [{ url, ids, params }], requests: [url] }.
-export function fakeUpdateServers({ cws = {}, files = {}, status = 200, redirects = {} } = {}) {
+export function fakeUpdateServers({ cws = {}, files = {}, status = 200, redirects = {}, cors = [] } = {}) {
   const prev = globalThis.fetch;
   const log = { cwsRequests: [], requests: [] };
   const matches = (url, k) => url === k || url.startsWith(k + "?") || url.startsWith(k + "&");
@@ -56,7 +58,8 @@ export function fakeUpdateServers({ cws = {}, files = {}, status = 200, redirect
       if (event) setTimeout(() => event.dispatch({ requestId: id, url, redirectUrl: to }), 20);
       if (init.redirect === "manual") return { type: "opaqueredirect", status: 0, ok: false, redirected: false, url, headers: new Headers() };
       const u = new URL(to);
-      if (!(await globalThis.chrome.permissions.contains({ origins: [`${u.protocol}//${u.hostname}/*`] }))) throw new TypeError("Failed to fetch");
+      const allowed = cors.includes(to) || (await globalThis.chrome.permissions.contains({ origins: [`${u.protocol}//${u.hostname}/*`] }));
+      if (!allowed) throw new TypeError("Failed to fetch");
       const res = await serve(to, init, id);
       Object.defineProperty(res, "url", { value: res.url || to });
       Object.defineProperty(res, "redirected", { value: true });

@@ -41,15 +41,28 @@ function watchRedirects(url) {
 }
 
 // An error with the host permissions (origin patterns) that would let the
-// operation succeed: error.neededOrigins.
-function needing(message, origins) {
+// operation succeed: error.neededOrigins ([] when none would help). Every
+// error of fetchFrom carries it: a fetch result (see rememberOrigins in manager.js).
+function needing(message, origins = []) {
   return Object.assign(new Error(message), { neededOrigins: origins });
+}
+
+const isHttps = (url) => /^https:/i.test(url);
+
+// The first hop of hops that is not an https URL, as an error, or null.
+function insecureHop(host, hops) {
+  const notHttps = hops.find((d) => !isHttps(d));
+  return notHttps ? needing(`${host} redirects to ${notHttps}, which is not an https URL`) : null;
 }
 
 // Why a fetch of url that failed with a network error failed, when it was a
 // redirect: an Error naming the destination (with neededOrigins when a host
 // permission would help), or null when it was not a redirect or the
-// extension holds every permission it needs.
+// extension holds every permission it may need. The redirect's events can come
+// after fetch rejected, the last hop's after earlier ones: up to
+// redirectTiming.waitMs it waits while no reported hop explains the failure
+// (one that is not https or lacks a host permission). When none does, the
+// failing hop went unreported, so it asks for ANY_HTTPS unless that is held.
 async function redirectFailure(url, init, watch) {
   const host = new URL(url).host;
   if (!watch.hops.length) {
@@ -60,35 +73,53 @@ async function redirectFailure(url, init, watch) {
       return null; // not reachable at all
     }
     if (probe.type !== "opaqueredirect") return null;
-    for (let t = 0; watch.available && !watch.hops.length && t < redirectTiming.waitMs; t += redirectTiming.pollMs) await sleep(redirectTiming.pollMs);
   }
-  if (!watch.hops.length) {
-    if (!(await missingOriginsOf([ANY_HTTPS])).length) return null;
-    return needing(`${host} redirects to a host the browser does not name; there is no host permission for ${ANY_HTTPS}`, [ANY_HTTPS]);
-  }
-  const notHttps = watch.hops.find((d) => !/^https:/i.test(d));
-  if (notHttps) return new Error(`${host} redirects to ${notHttps}, which is not an https URL`);
+  const explained = async () => !!insecureHop(host, watch.hops) || (await missingOriginsOf(watch.hops.map(originOf))).length > 0;
+  for (let t = 0; watch.available && t < redirectTiming.waitMs && !(await explained()); t += redirectTiming.pollMs) await sleep(redirectTiming.pollMs);
+  const insecure = insecureHop(host, watch.hops);
+  if (insecure) return insecure;
   const missing = await missingOriginsOf(watch.hops.map(originOf));
-  if (!missing.length) return null;
-  const first = new URL(watch.hops.find((d) => missing.includes(originOf(d)))).host;
-  return needing(`${host} redirects to ${first}, and there is no host permission for ${missing.join(", ")}`, missing);
+  if (missing.length) {
+    const last = new URL(watch.hops.findLast((d) => missing.includes(originOf(d)))).host;
+    return needing(`${host} redirects to ${last}, and there is no host permission for ${missing.join(", ")}`, missing);
+  }
+  if (!(await missingOriginsOf([ANY_HTTPS])).length) return null;
+  return needing(`${host} redirects to a host the browser does not name; there is no host permission for ${ANY_HTTPS}`, [ANY_HTTPS]);
+}
+
+// The redirect hops of a fetch that answered res (redirected): waits up to
+// redirectTiming.waitMs for webRequest to report the hop to res.url, as its
+// events may come after fetch resolved. Without the API: no hops are known.
+async function settledHops(res, watch) {
+  const done = () => watch.hops.length && watch.hops.at(-1).replace(/#.*/, "") === res.url;
+  for (let t = 0; watch.available && res.redirected && t < redirectTiming.waitMs && !done(); t += redirectTiming.pollMs) await sleep(redirectTiming.pollMs);
+  return watch.hops;
 }
 
 // GETs url (no credentials unless init says so); throws a message naming the
 // host on an HTTP error or a network error, or naming the redirect's
 // destination when a redirect to a host without a permission failed (see
-// redirectFailure; error.neededOrigins lists the origins to request).
+// redirectFailure; error.neededOrigins lists the origins to request). Before
+// the answer is read, the answer's URL and every redirect hop webRequest
+// reported must be https, also when the fetch succeeded (a redirect to a host
+// that allows CORS is followed without a permission, over http too).
 export async function fetchFrom(url, init = {}) {
   const request = { credentials: "omit", ...init };
+  const host = new URL(url).host;
   const watch = watchRedirects(url);
   try {
     let res;
     try {
       res = await fetch(url, request);
     } catch (e) {
-      throw (await redirectFailure(url, request, watch)) || new Error(`cannot reach ${new URL(url).host} (${e.message})`);
+      throw (await redirectFailure(url, request, watch)) || needing(`cannot reach ${host} (${e.message})`);
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
+    const insecure = insecureHop(host, [...(await settledHops(res, watch)), res.url || url]);
+    if (insecure) {
+      res.body?.cancel().catch(() => {}); // not read
+      throw insecure;
+    }
+    if (!res.ok) throw needing(`HTTP ${res.status} from ${host}`);
     return res;
   } finally {
     watch.stop();

@@ -6,8 +6,8 @@ import {
 } from "./lib/manager.js";
 import { getRepo, getSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
-import { CWS_ORIGINS, parseSourceInput } from "./lib/sources.js";
 import { friendly } from "./friendly.js";
+import { addOrigins, askOrigins, cardId, checkLine, hostOf, isConversionError, offersInstall, plural } from "./ui-logic.js";
 import { setTheme, startTheme } from "./theme.js";
 
 const $ = (id) => document.getElementById(id);
@@ -183,8 +183,6 @@ async function act(button, fn, where) {
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
 const formatDate = (iso) => (iso ? dateFormat.format(new Date(iso)) : "");
-const pluralRules = new Intl.PluralRules("en");
-const plural = (n, one, other) => `${n} ${pluralRules.select(n) === "one" ? one : other}`;
 const formatSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB");
 
 const STATE_LABEL = {
@@ -197,8 +195,6 @@ const STATE_LABEL = {
   "not-offered": "Not offered",
   "identity-change": "New extension ID",
 };
-// Set by the storage migration when a 0.1 regex pattern had no template form.
-const isConversionError = (msg) => /could not be converted to a file name template/.test(msg || "");
 const extOf = (name) => (name.match(/\.(crx|zip)$/i) || [])[1];
 
 // Per-card progress and errors: key -> { busy, text, error: { text, detail } }.
@@ -246,14 +242,8 @@ const removeArmed = new Map();
 // chrome.permissions.request needs the user gesture: call this synchronously in the click
 // handler, before any await, and await the promise it returns inside the action.
 // origins: the lib's needsOrigins for the record or the installed extension ([] when granted).
-function requestOrigins(origins) {
-  if (!origins || !origins.length) return Promise.resolve();
-  const asked = chrome.permissions.request({ origins });
-  return asked.then((granted) => {
-    if (!granted) throw new Error(`grant access: ${origins.map(hostOf).join(", ")} was not granted`);
-  });
-}
-const hostOf = (origin) => origin.replace(/^[a-z]+:\/\//, "").replace(/\/\*?$/, "");
+// required: a decline rejects (see askOrigins in ui-logic.js).
+const requestOrigins = (origins, required) => askOrigins((req) => chrome.permissions.request(req), origins, { required });
 
 // ---- asset picker ----
 
@@ -413,8 +403,8 @@ function card(v) {
   const titleId = `title-${key}`;
   const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
   const identity = state === "identity-change";
-  // Store and self-hosted: only a build with a download (a self-hosted "noupdate" has codebase null).
-  const canInstall = github ? latest && latest.asset && !identity : !!(latest && latest.codebase);
+  // The lib's canInstall: a downloadable build (a self-hosted "noupdate" has none).
+  const canInstall = offersInstall(v);
   // A migration that could not convert the pattern asks for the asset again: a
   // to-do on the "No asset" card, not a failed check. Once a template is set it is stale.
   const converted = isConversionError(record.error);
@@ -447,9 +437,10 @@ function card(v) {
   // Typed text survives renders, also when the lib rejects the template.
   if (templateDraft.has(key)) templateInput.value = templateDraft.get(key);
 
-  // Check (and Allow access) first ask for the hosts the record still needs, in the click itself.
+  // Check (and Allow access) first ask for the hosts the record still needs, in the click
+  // itself; declined, the check still runs and its error says what is needed now.
   const check = (e) => {
-    const asked = requestOrigins(needs);
+    const asked = requestOrigins(needs, false);
     act(e.currentTarget, async () => {
       await asked;
       await checkRepo(key).then(refreshBadge).catch((err) => {
@@ -548,7 +539,7 @@ function card(v) {
                 "data-ctl": "install", "aria-label": `${installLabel} ${title}`,
                 // The card then shows the pending install until the browser confirms it.
                 onclick: () => {
-                  const asked = requestOrigins(needs);
+                  const asked = requestOrigins(needs, false);
                   cardAct(key, async (progress) => {
                     await asked;
                     await installRelease(key, undefined, progress);
@@ -649,9 +640,6 @@ function removeControls(key, record, hasKey, name, title) {
     hint);
 }
 
-// Injective: every character other than a-z, 0-9 becomes _<hex code>_ ("_" included).
-const cardId = (key) => `card-${key.replace(/[^a-z0-9]/gi, (c) => `_${c.codePointAt(0).toString(16)}_`)}`;
-
 // ---- Installed tab ----
 // Every installed extension, grouped by kind, each row with one action: Track (store or own
 // update server), Link a GitHub repo (no update source), a link to its card (tracked), or
@@ -744,7 +732,7 @@ function installedRow(x, trackedByKey) {
       "data-ctl": "track", "aria-label": `Track ${x.name}`,
       onclick: (e) => {
         // The permission prompt needs this click: ask before anything awaits.
-        const asked = requestOrigins(x.needsOrigins);
+        const asked = requestOrigins(x.needsOrigins, true);
         rowAct(x.id, e.currentTarget, async () => {
           await asked;
           await trackInstalled(x.id);
@@ -937,9 +925,7 @@ async function renderNow() {
   renderKeyChoice(view, fileKeys);
   renderFileKeys(fileKeys);
   const { lastCheck, rateLimit } = await chrome.storage.local.get(["lastCheck", "rateLimit"]);
-  $("checkInfo").textContent = lastCheck
-    ? `Last checked ${new Date(lastCheck.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
-    : "Not checked yet. Checks run every 6 hours.";
+  $("checkInfo").textContent = checkLine(lastCheck, view, (at) => new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }));
   // After the reset time the stored count is stale: say so, and re-render at the reset.
   clearTimeout(rateTimer);
   const resetAt = rateLimit && new Date(rateLimit.reset).toLocaleTimeString(undefined, { timeStyle: "short" });
@@ -978,13 +964,7 @@ $("addForm").addEventListener("submit", (e) => {
   const input = $("addInput").value;
   // A store item is checked right away, so the CWS hosts are asked for in this submit
   // gesture, before anything awaits. Input that does not parse fails inside addRepo.
-  let parsed = null;
-  try {
-    parsed = parseSourceInput(input);
-  } catch {
-    parsed = null;
-  }
-  const asked = parsed && parsed.source === "cws" ? requestOrigins(CWS_ORIGINS) : Promise.resolve();
+  const asked = requestOrigins(addOrigins(input), true);
   act(e.submitter, async () => {
     await asked; // declined: nothing is added
     const key = await addRepo(input);
@@ -1132,11 +1112,14 @@ $("importInput").addEventListener("change", (e) =>
 
 // Conflicts, warnings and check errors of the last import stay under Backup
 // until the next import.
-// lib import warning "<key>: extension <id> is already tracked as <other>; <key> was not imported"
-// in words; other warnings stay as the lib wrote them.
+// lib import warnings "<key>: extension <id> is already tracked as <other>; <key> was not imported"
+// and "<key>: extension <id> already has another file key; the backup's key of <key> was not
+// imported" in words; other warnings stay as the lib wrote them.
 function importWarning(w) {
   const m = /^(\S+): extension \S+ is already tracked as (\S+); \S+ was not imported/.exec(w);
-  return m ? `${m[1]} was skipped: this extension is already tracked as ${m[2]}.` : w;
+  if (m) return `${m[1]} was skipped: this extension is already tracked as ${m[2]}.`;
+  const k = /^(\S+): extension (\S+) already has another file key; the backup's key of \S+ was not imported/.exec(w);
+  return k ? `${k[1]}: the backup's signing key was not restored, because extension ${k[2]} already has another key here.` : w;
 }
 
 async function showImportResult({ count, errors, conflicts, warnings }) {

@@ -1,5 +1,6 @@
 import { trackedView } from "./lib/manager.js";
 import { friendly } from "./friendly.js";
+import { checkLine, plural, popupSummary } from "./ui-logic.js";
 import { startTheme } from "./theme.js";
 
 const $ = (id) => document.getElementById(id);
@@ -15,7 +16,6 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
-const plural = (n, one, many) => `${n} ${new Intl.PluralRules().select(n) === "one" ? one : many}`;
 const when = (at) => new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 // Owner avatar with the installed extension's icon as a corner badge, as on the options cards.
@@ -74,17 +74,8 @@ function attentionRow(v) {
 
 async function render() {
   const view = await trackedView();
-  const updates = view.filter((v) => v.state === "update");
-  const attention = view.filter((v) => v.state === "identity-change" || v.state === "not-offered");
-  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : "current";
+  const { state, updates, attention, headline: summary } = popupSummary(view);
   document.body.dataset.state = state;
-  const summary = state === "empty"
-    ? "No tracked extensions"
-    : state === "update"
-      ? `${plural(updates.length, "update", "updates")} available`
-      : state === "attention"
-        ? `${plural(attention.length, "extension needs", "extensions need")} attention`
-        : "All up to date";
   // A live region: write only a changed headline, so a check with the same result is not read twice.
   if ($("summary").textContent !== summary) $("summary").textContent = summary;
   $("emptyHint").hidden = state !== "empty";
@@ -92,11 +83,7 @@ async function render() {
   $("updates").replaceChildren(...updates.map(row), ...attention.map(attentionRow));
   const { lastCheck } = await chrome.storage.local.get("lastCheck");
   const tracked = state === "current" ? `${plural(view.length, "extension", "extensions")} tracked · ` : "";
-  $("lastCheck").textContent = state === "empty"
-    ? ""
-    : tracked + (lastCheck
-      ? `Last checked ${when(lastCheck.at)}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
-      : "Not checked yet. Checks run every 6 hours.");
+  $("lastCheck").textContent = state === "empty" ? "" : tracked + checkLine(lastCheck, view, when);
   $("lastCheck").hidden = !$("lastCheck").textContent;
 }
 

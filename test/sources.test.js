@@ -190,26 +190,6 @@ test("a failed store request gives each record of it an error naming the record 
   assert.ok(env.store["repo:o/r"].releases, "the GitHub record was checked");
 });
 
-// Designer's report (parent request m-3c386688): "Last checked … · 1 error"
-// counts the records whose last check failed, also after a card's own check
-// or a removal fixed or dropped one; its time stays checkAll's.
-test("lastCheck's errors follow the records' errors after a card's check and a removal", async () => {
-  const env = profile();
-  fakeGithub([]);
-  env.store[`repo:${JB_KEY}`] = newSourceRecord("cws", JUST_BLACK);
-  env.store[`repo:cws:${DARK_READER}`] = newSourceRecord("cws", DARK_READER);
-  fakeUpdateServers({ status: 503 });
-  await checkAll();
-  const { at } = env.store.lastCheck;
-  assert.equal(env.store.lastCheck.errors.length, 2);
-  fakeUpdateServers({ cws: { [JUST_BLACK]: REAL_APPS.get(JUST_BLACK) } });
-  await checkRepo(JB_KEY);
-  assert.deepEqual(env.store.lastCheck.errors, [`check cws:${DARK_READER}: HTTP 503 from clients2.google.com`]);
-  assert.equal(env.store.lastCheck.at, at, "still the time of the last full check");
-  await manager.removeRepo(`cws:${DARK_READER}`);
-  assert.deepEqual(env.store.lastCheck.errors, []);
-});
-
 test("a store answer that lists an extension not asked for is refused", async () => {
   profile();
   fakeGithub([]);
@@ -600,6 +580,53 @@ test("on desktop, a refused install whose copy vanished after its page's check i
   assert.equal((await environment()).installBlocked, null);
 });
 
+// Closure review F9 (repro sweep-races.mjs, first case): a hand-off's
+// onStarted write is queued for the state lock ahead of the sweep, so the
+// sweep's entries differ from what it saw before taking the lock; it judges
+// the entries it reads under the lock.
+test("on desktop, a sweep judges a refused download whose start was recorded just before the sweep took the lock", async () => {
+  const env = profile({ platform: "desktop" });
+  fakeGithub([]);
+  await environment();
+  const STATE = "extainium-state";
+  const { promise: held, resolve: release } = Promise.withResolvers();
+  const { promise: got, resolve: acquired } = Promise.withResolvers();
+  const locker = navigator.locks.request(STATE, async () => { acquired(); await held; });
+  await got;
+  const now = Date.now();
+  const entry = {
+    token: "late", repoKey: null, extensionId: RSA_ID, version: "1.0", installed: { version: "1.0", tag: null, digest: null },
+    at: now, downloadId: null, downloadDone: false, promptAt: null, confirmedAt: null, fileGone: false,
+  };
+  env.store["install:late"] = entry;
+  const started = navigator.locks.request(STATE, async () => {
+    env.store["install:late"] = { ...entry, downloadId: 42, startedAt: now };
+    env.files.set(42, { state: "complete", exists: false, startTime: new Date(now).toISOString(), endTime: new Date(now + 15).toISOString() });
+  });
+  const sweeping = manager.sweepDownloads();
+  while ((await navigator.locks.query()).pending.filter((x) => x.name === STATE).length < 2) await sleep(1);
+  release();
+  await Promise.all([locker, started, sweeping]);
+  await manager.sweepDownloads();
+  assert.equal((await environment()).installBlocked?.hint, "flag");
+});
+
+// Closure review F13 (repro sweep-races.mjs, second case): an older refusal
+// candidate judged after a newer install was confirmed is retired.
+test("on desktop, an old refusal candidate does not set installBlocked after a later install was confirmed", async () => {
+  const env = profile({ platform: "desktop" });
+  fakeGithub([]);
+  const old = await installFile(RSA_CRX, "a.crx");
+  await sleep(30); // the page's own check still sees the copy
+  const newer = await installFile(ECDSA_CRX, "b.crx");
+  await browserInstalls(env, newer.extensionId, "1.0");
+  assert.equal((await environment()).installBlocked, null);
+  env.files.get(1).exists = false; // the old copy is gone only now
+  await manager.sweepDownloads();
+  assert.equal((await environment()).installBlocked, null, "installs work: the newer one was confirmed");
+  assert.equal(Object.values(env.store).some((e) => e && e.token === old.token && e.refusalCandidate), false, "the old candidate is retired");
+});
+
 // ---- backup format 4 ----
 
 test("a backup carries CWS and update-URL records and restores them; an existing record keeps its state", async () => {
@@ -661,6 +688,41 @@ test("importing a backup skips a record whose extension ID another record alread
   const again = await importBackup(await exportBackup());
   assert.deepEqual(again.warnings, []);
   assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("repo:")).sort(), ["repo:o/r", "repo:p/q", `repo:url:${UBO}`]);
+});
+
+// Closure review F11 (repro backup-orphan-key.mjs): which records are imported
+// is decided before any key moves; the key of a skipped record stays a file
+// key (selectable for file installs), never an orphan repo key.
+test("importing a backup whose GitHub record is skipped for a duplicate ID keeps that record's key as a file key", async () => {
+  const env = profile();
+  fakeGithub([]);
+  fakeUpdateServers({ cws: {} });
+  const newKey = () => {
+    const { privateKey, publicKey } = nodeCrypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+    return { b64: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"), spki: new Uint8Array(publicKey.export({ type: "spki", format: "der" })) };
+  };
+  const stored = newKey(); // already a file key here
+  const fresh = newKey(); // only in the backup
+  const storedId = await extensionIdFromSpki(stored.spki);
+  const freshId = await extensionIdFromSpki(fresh.spki);
+  env.store[`filekey:${storedId}`] = stored.b64;
+  env.store[`repo:cws:${storedId}`] = newSourceRecord("cws", storedId);
+  env.store[`repo:cws:${freshId}`] = newSourceRecord("cws", freshId);
+  const gh = (repo, extensionId) => ({ owner: "o", repo, template: null, includePrereleases: false, extensionId, installed: null, addedAt: 1 });
+  const backup = {
+    format: "extainium-backup", version: 4, exportedAt: "2026-11-24T00:00:00.000Z",
+    repos: [gh("r", storedId), gh("s", freshId)], sources: [], keys: { "o/r": stored.b64, "o/s": fresh.b64 }, fileKeys: {},
+  };
+  const { count, warnings } = await importBackup(JSON.stringify(backup));
+  assert.equal(count, 0);
+  assert.deepEqual(warnings, [
+    `o/r: extension ${storedId} is already tracked as cws:${storedId}; o/r was not imported`,
+    `o/s: extension ${freshId} is already tracked as cws:${freshId}; o/s was not imported`,
+  ]);
+  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("key:")), [], "no repo key without its repo");
+  assert.deepEqual((await manager.fileKeysView()).map((k) => k.extensionId).sort(), [storedId, freshId].sort());
+  assert.equal(env.store[`filekey:${storedId}`], stored.b64);
+  assert.equal(env.store[`filekey:${freshId}`], fresh.b64);
 });
 
 test("a version 4 backup with a malformed source entry is refused naming the entry and field", async () => {

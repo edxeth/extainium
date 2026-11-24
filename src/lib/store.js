@@ -4,6 +4,10 @@
 //                      Store or of a self-hosted update URL (newSourceRecord)
 //   "installBlocked"   { at, hint: "flag" }: a desktop install the browser
 //                      refused (manager.js environment)
+//   "installWorkedAt"  time of the last confirmed install; an older refusal
+//                      candidate cannot set installBlocked (manager.js judgeRefusal)
+//   "lastCheck"        { at, updates } of the last checkAll (older ones also
+//                      hold errors, no longer read)
 //   "key:owner/name"   base64 PKCS#8 RSA signing key for zip assets; written
 //                      once, kept when the repo is no longer tracked (retained
 //                      key), deleted only together with an uninstall
@@ -105,8 +109,9 @@ export function newRecord(owner, repo) {
 //   build; size and hash null when the server announced none; codebase null
 //   when a self-hosted server answered "noupdate" for the installed version),
 //   unavailable: { malware } | null  (the server offers no build to this browser),
-//   redirectOrigins: [origin pattern]  (destinations of redirects that failed
-//     for want of a host permission; absent in older records; not in backups),
+//   redirectOrigins: [origin pattern]  (the origins the last fetch's redirect
+//     lacked a host permission for, [] after a fetch that answered; absent in
+//     older records; not in backups),
 //   identityChange: null, checkedAt, error, addedAt }
 export function newSourceRecord(source, id, { updateUrl = null, name = null, installed = null, addedAt = Date.now() } = {}) {
   return {
