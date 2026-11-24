@@ -2,21 +2,17 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width">
-<title>Titanium</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extainium</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="popup">
-  <div class="row">
-    <label for="enabled">Redirect downloads</label>
-    <input type="checkbox" id="enabled">
-  </div>
-  <div class="row">
-    <span class="muted">Sending to</span>
-    <span id="target"></span>
-  </div>
-  <button id="openOptions">Options</button>
-  <script src="common.js"></script>
-  <script src="popup.js"></script>
+  <h1 id="summary">Extainium</h1>
+  <ul id="updates" class="plain"></ul>
+  <p id="lastCheck" class="hint"></p>
+  <p id="error" class="error" hidden></p>
+  <button id="check">Check now</button>
+  <button id="open" class="primary">Open Extainium</button>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

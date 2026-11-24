@@ -1,42 +1,30 @@
 {
   "manifest_version": 3,
-  "name": "Titanium",
-  "version": "0.0.1",
-  "description": "This extension offers additional features for Chromium on Android, including support for securely installing extensions from alternative marketplaces, using external download managers, enhanced dark mode, and more.",
+  "name": "Extainium",
+  "version": "0.1.3",
+  "description": "Install and update browser extensions from GitHub releases (.crx or .zip), like Obtainium does for apps. Built for Titanium on Android.",
   "permissions": [
     "downloads",
-    "tabs",
-    "cookies",
-    "contextMenus",
     "storage",
-    "declarativeNetRequestWithHostAccess"
+    "alarms",
+    "management"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://api.github.com/*",
+    "https://github.com/*",
+    "https://objects.githubusercontent.com/*",
+    "https://release-assets.githubusercontent.com/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
-  "declarative_net_request": {
-    "rule_resources": [
-      { "id": "opera_ua", "enabled": true, "path": "marketplaces/opera.json" },
-      { "id": "edge_ua", "enabled": true, "path": "marketplaces/edge.json" }
-    ]
-  },
-  "content_scripts": [
-    {
-      "matches": ["*://microsoftedge.microsoft.com/addons/*"],
-      "js": ["common.js", "marketplaces/edge-install.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Titanium"
+    "default_title": "Extainium"
   },
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
-  },
-  "incognito": "split"
+  }
 }

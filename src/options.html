@@ -2,121 +2,81 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width">
-<title>Titanium Extension</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extainium</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="options">
-  <h1>Titanium Extension</h1>
+  <header class="row">
+    <h1>Extainium</h1>
+    <button id="checkAll">Check all</button>
+  </header>
+  <p id="checkInfo" class="hint"></p>
+  <p id="message" class="message" hidden></p>
 
   <section>
-    <h2>Downloads</h2>
-    <div class="row">
-      <label for="enabled">Redirect downloads</label>
-      <input type="checkbox" id="enabled">
-    </div>
-    <p class="hint">Automatically redirect downloads to the download manager. You can still manually send links via the context menu when off.</p>
-    <div class="row">
-      <label for="handoffMode">Handoff style</label>
-      <select id="handoffMode">
-        <option value="confirm">Confirm (recommended)</option>
-        <option value="auto">Direct</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="skipExtensions">Skip file extensions</label>
-      <input type="text" id="skipExtensions" placeholder="crx, apk">
-    </div>
-    <p class="hint">Downloads whose filename ends in one of these stay in the browser instead of being redirected to the download manager. Comma separated list.</p>
+    <h2>Add repository</h2>
+    <form id="addForm" class="field">
+      <input type="text" id="addInput" placeholder="owner/repo or GitHub URL" autocapitalize="off" autocomplete="off" spellcheck="false" required>
+      <button class="primary">Add</button>
+    </form>
   </section>
 
-  <section>
-    <h2>Download manager</h2>
+  <section id="pickerSection" hidden>
+    <h2 id="pickerTitle">Choose asset</h2>
+    <p id="pickerRelease" class="hint"></p>
+    <div id="pickerAssets"></div>
+    <label class="row"><span>Show all assets</span><input type="checkbox" id="pickerAll"></label>
     <div class="row">
-      <label for="manager">Application preset</label>
-      <select id="manager"></select>
-    </div>
-    <div class="row">
-      <label for="packageName">Android package ID</label>
-      <input type="text" id="packageName" list="knownPackages">
-      <datalist id="knownPackages"></datalist>
-    </div>
-    <p class="hint">This must match the installed variant of the application exactly (e.g. <code>idm.internet.download.manager.plus</code> for 1DM+). The intent only runs when resolved to the correct application.</p>
-    <div class="row" id="customModeRow" hidden>
-      <label for="customMode">Intent style</label>
-      <select id="customMode">
-        <option value="view">VIEW (URL as intent data)</option>
-        <option value="send">SEND (URL as EXTRA_TEXT)</option>
-      </select>
-    </div>
-    <div class="row">
-      <label for="forwardCookies">Forward cookies and headers</label>
-      <input type="checkbox" id="forwardCookies">
+      <button id="pickerCancel">Cancel</button>
     </div>
   </section>
 
   <section>
-    <h2>Extension marketplaces</h2>
-    <div class="row">
-      <label for="fileName">Install from file</label>
-      <span class="field">
-        <input type="file" id="fileInput" accept=".zip,.crx,application/zip,application/x-chrome-extension" hidden>
-        <input type="text" id="fileName" placeholder="None selected" readonly>
-        <button id="fileButton">Set</button>
-      </span>
+    <h2>Tracked</h2>
+    <div id="list"></div>
+    <p id="empty" class="hint" hidden>Nothing tracked yet. Add a GitHub repository above.</p>
+  </section>
+
+  <section>
+    <h2>Install from file</h2>
+    <div class="field">
+      <input type="file" id="fileInput" accept=".crx,.zip">
     </div>
-    <p class="hint">Select a zip or crx file to install. Files are signed on-device.</p>
-    <p id="fileStatus" class="hint" hidden></p>
-    <div class="row">
-      <label for="operaUrl">Opera Add-ons</label>
-      <span class="field">
-        <input type="text" id="operaUrl" placeholder="https://addons.opera.com/en/extensions/details/...">
-        <button id="operaGet">Go</button>
-      </span>
-    </div>
-    <div class="row">
-      <label for="edgeUrl">Microsoft Edge Add-ons</label>
-      <span class="field">
-        <input type="text" id="edgeUrl" placeholder="https://microsoftedge.microsoft.com/addons/detail/...">
-        <button id="edgeGet">Go</button>
-      </span>
-    </div>
-    <div class="row">
-      <label for="cwsUrl">Chrome Web Store</label>
-      <span class="field">
-        <input type="text" id="cwsUrl" placeholder="https://chromewebstore.google.com/detail/...">
-        <button id="cwsGet">Go</button>
-      </span>
-    </div>
-    <p class="hint">Enter the extension's marketplace page URL to download the extension file. If no install prompt appears, you can alternatively unzip the extension file and load it unpacked.</p>
-    <p id="getError" class="hint" hidden>Not a recognized marketplace URL.</p>
-    <div class="row">
-      <label for="patchOpera">Patch Opera Add-ons page</label>
-      <input type="checkbox" id="patchOpera">
-    </div>
-    <div class="row">
-      <label for="patchEdge">Patch Microsoft Edge Add-ons page</label>
-      <input type="checkbox" id="patchEdge">
+    <label class="row"><span>Sign .zip with key of</span>
+      <select id="fileKey"><option value="">a new key</option></select>
+    </label>
+    <p class="hint">A .zip is packed into a CRX. Signing with a tracked repo's key installs it as that repo's extension (same ID, data kept).</p>
+    <div class="row"><button id="fileInstall" class="primary">Install</button></div>
+    <div id="fileTrack" hidden>
+      <p id="fileResult" class="hint"></p>
+      <form id="fileTrackForm" class="field">
+        <input type="text" id="fileTrackInput" placeholder="Track with owner/repo (optional)" autocapitalize="off" autocomplete="off" spellcheck="false" required>
+        <button>Track</button>
+      </form>
     </div>
   </section>
 
   <section>
-    <h2>Developer options</h2>
-    <div class="row">
-      <label for="devMode">Show log window</label>
-      <input type="checkbox" id="devMode">
-    </div>
-    <div id="devTools" hidden>
-      <div class="row">
-        <button id="clearLog">Clear</button>
-      </div>
-      <pre id="devLog">(empty)</pre>
-    </div>
+    <h2>Settings</h2>
+    <form id="tokenForm" class="field">
+      <input type="password" id="token" placeholder="GitHub token (optional)" autocomplete="off">
+      <button>Save</button>
+    </form>
+    <p class="hint">Raises the API limit from 60 to 5000 requests per hour. Kept in this browser only and sent only to api.github.com. A fine-grained token with no permissions is enough for public repos.</p>
+    <p id="rateInfo" class="hint"></p>
   </section>
 
-  <p id="saved">Saved</p>
+  <section>
+    <h2>Backup</h2>
+    <div class="row">
+      <button id="export">Export</button>
+      <button id="import">Import</button>
+      <input type="file" id="importInput" accept=".json,application/json" hidden>
+    </div>
+    <p class="hint warn">The export file contains the signing keys of your .zip-based extensions. Keep it private. Without these keys a reinstall gets a new extension ID and loses its data.</p>
+  </section>
 
-  <script src="common.js"></script>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>
