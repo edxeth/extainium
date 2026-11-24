@@ -1,0 +1,126 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  compareVersions, derivePattern, latestFor, matchAssets, parseRepo,
+  selectRelease, simplifyReleases, updateState, versionFromTag,
+} from "../src/lib/releases.js";
+
+test("parseRepo accepts owner/repo and github.com URLs of the repo or a release", () => {
+  const want = { owner: "gorhill", repo: "uBlock" };
+  for (const input of [
+    "gorhill/uBlock",
+    " gorhill/uBlock ",
+    "https://github.com/gorhill/uBlock",
+    "https://github.com/gorhill/uBlock/",
+    "https://github.com/gorhill/uBlock.git",
+    "http://www.github.com/gorhill/uBlock/tree/master/src",
+    "github.com/gorhill/uBlock",
+    "https://github.com/gorhill/uBlock/releases",
+    "https://github.com/gorhill/uBlock/releases/tag/1.77.0",
+    "https://github.com/gorhill/uBlock/releases/download/1.77.0/uBlock0_1.77.0.chromium.crx",
+  ]) {
+    assert.deepEqual(parseRepo(input), want, input);
+  }
+  assert.deepEqual(parseRepo("kaovilai/github-bot-command-palette"), { owner: "kaovilai", repo: "github-bot-command-palette" });
+});
+
+test("parseRepo rejects other hosts and inputs without owner and repo", () => {
+  for (const input of ["", "gorhill", "https://gitlab.com/gorhill/uBlock", "https://github.com/gorhill", "a b/c", "github.com/gorhill"]) {
+    assert.throws(() => parseRepo(input), /parse repo/, input);
+  }
+});
+
+test("compareVersions orders numerically with pre-releases before releases", () => {
+  const cases = [
+    ["1.10", "1.9", 1],
+    ["1.0", "1.0.0", 0],
+    ["v1.2", "1.2", 0],
+    ["1.77.0", "1.77.0", 0],
+    ["1.77.1", "1.77.0", 1],
+    ["1.77.1b3", "1.77.0", 1],
+    ["1.77.1b3", "1.77.1", -1],
+    ["1.77.1b3", "1.77.1b10", -1],
+    ["2.0-rc1", "2.0-beta2", 1],
+    ["0.0.1", "0.0.0.9", 1],
+  ];
+  for (const [a, b, want] of cases) {
+    assert.equal(compareVersions(a, b), want, `${a} vs ${b}`);
+    assert.equal(compareVersions(b, a), 0 - want || 0, `${b} vs ${a}`);
+  }
+  assert.throws(() => compareVersions("latest", "1.0"), /not a version: "latest"/);
+});
+
+test("versionFromTag extracts the version part of common tag styles", () => {
+  assert.equal(versionFromTag("v1.2.1"), "1.2.1");
+  assert.equal(versionFromTag("1.77.1b3"), "1.77.1b3");
+  assert.equal(versionFromTag("release-3.4"), "3.4");
+  assert.equal(versionFromTag("nightly"), null);
+});
+
+const asset = (name) => ({ name, url: "https://example.invalid/" + name, size: 1, digest: null });
+const release = (tag, names, extra = {}) => ({ tag, name: tag, prerelease: false, publishedAt: "2026-01-01T00:00:00Z", htmlUrl: "", assets: names.map(asset), ...extra });
+
+test("derivePattern generalizes the version so the same asset is found in later releases", () => {
+  const ublock = derivePattern("uBlock0_1.77.0.chromium.crx", "1.77.0");
+  const later = release("1.78.0", ["uBlock0_1.78.0.chromium.crx", "uBlock0_1.78.0.chromium.zip", "uBlock0_1.78.0.firefox.signed.xpi"]);
+  assert.deepEqual(matchAssets(later, ublock).map((a) => a.name), ["uBlock0_1.78.0.chromium.crx"]);
+  const beta = release("1.77.1b3", ["uBlock0_1.77.1b3.chromium.crx", "uBlock0_1.77.1b3.chromium.zip"]);
+  assert.deepEqual(matchAssets(beta, ublock).map((a) => a.name), ["uBlock0_1.77.1b3.chromium.crx"]);
+
+  const palette = derivePattern("github-bot-command-palette-v1.2.0.zip", "v1.2.0");
+  const next = release("v1.2.1", ["github-bot-command-palette-v1.2.1.crx", "github-bot-command-palette-v1.2.1.zip", "github-bot-command-palette.crx", "github-bot-command-palette.zip"]);
+  assert.deepEqual(matchAssets(next, palette).map((a) => a.name), ["github-bot-command-palette-v1.2.1.zip"]);
+});
+
+test("derivePattern generalizes dotted numbers when the tag version is not in the name, and keeps fixed names literal", () => {
+  const p = derivePattern("ext-2.3.4-chrome.zip", "release-42");
+  assert.deepEqual(matchAssets(release("release-43", ["ext-2.4.0-chrome.zip", "ext-2.4.0-firefox.zip"]), p).map((a) => a.name), ["ext-2.4.0-chrome.zip"]);
+  const fixed = derivePattern("extension.zip", "v1.0");
+  assert.deepEqual(matchAssets(release("v2.0", ["extension.zip", "extension.zip.sig", "my-extension.zip"]), fixed).map((a) => a.name), ["extension.zip"]);
+});
+
+test("simplifyReleases drops drafts and keeps asset digests", () => {
+  const api = [
+    { tag_name: "v2", name: "", draft: true, prerelease: false, published_at: "x", html_url: "h2", assets: [] },
+    { tag_name: "v1", name: "One", draft: false, prerelease: true, published_at: "2026-01-01T00:00:00Z", html_url: "h1",
+      assets: [{ name: "a.zip", browser_download_url: "u", size: 3, digest: "sha256:ab" }] },
+  ];
+  assert.deepEqual(simplifyReleases(api), [
+    { tag: "v1", name: "One", prerelease: true, publishedAt: "2026-01-01T00:00:00Z", htmlUrl: "h1", assets: [{ name: "a.zip", url: "u", size: 3, digest: "sha256:ab" }] },
+  ]);
+});
+
+test("selectRelease picks the newest release with a matching asset and honors the pre-release toggle", () => {
+  const releases = [
+    release("1.0", ["x-1.0.crx"], { publishedAt: "2026-01-01T00:00:00Z" }),
+    release("1.2b1", ["x-1.2b1.crx"], { publishedAt: "2026-03-01T00:00:00Z", prerelease: true }),
+    release("1.1", ["notes.txt"], { publishedAt: "2026-02-01T00:00:00Z" }),
+  ];
+  const p = derivePattern("x-1.0.crx", "1.0");
+  assert.equal(selectRelease(releases, p, false).release.tag, "1.0");
+  assert.equal(selectRelease(releases, p, true).release.tag, "1.2b1");
+  assert.equal(selectRelease(releases, "^nothing$", true), null);
+});
+
+test("latestFor leaves the asset unset when several assets match", () => {
+  const record = { pattern: "\\.zip$", includePrereleases: false, releases: [release("v1", ["a.zip", "b.zip"])] };
+  const latest = latestFor(record);
+  assert.equal(latest.asset, null);
+  assert.deepEqual(latest.candidates.map((a) => a.name), ["a.zip", "b.zip"]);
+});
+
+test("updateState: digest decides when Extainium installed the running version, versions decide otherwise", () => {
+  const latest = { tag: "1.78.0", asset: { ...asset("u_1.78.0.crx"), digest: "sha256:new" } };
+  const ext = (version) => ({ id: "x", version });
+  assert.equal(updateState({ latest: null, installed: null }, null), "no-asset");
+  assert.equal(updateState({ latest: { ...latest, asset: null }, installed: null }, ext("1")), "ambiguous");
+  assert.equal(updateState({ latest, installed: null }, null), "not-installed");
+  // Installed outside Extainium: compare the tag's version with the manifest version.
+  assert.equal(updateState({ latest, installed: null }, ext("1.77.0")), "update");
+  assert.equal(updateState({ latest, installed: null }, ext("1.78.0")), "current");
+  // Installed by Extainium and still running that version: compare digests, then tags.
+  assert.equal(updateState({ latest, installed: { tag: "1.78.0", digest: "sha256:new", version: "1.78.0" } }, ext("1.78.0")), "current");
+  assert.equal(updateState({ latest, installed: { tag: "1.78.0", digest: "sha256:old", version: "1.78.0" } }, ext("1.78.0")), "update");
+  assert.equal(updateState({ latest: { ...latest, asset: asset("n") }, installed: { tag: "1.77.0", digest: null, version: "5" } }, ext("5")), "update");
+  assert.equal(updateState({ latest: { tag: "nightly", asset: asset("n") }, installed: null }, ext("5")), "unknown");
+});

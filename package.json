@@ -1,0 +1,15 @@
+{
+  "name": "extainium",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Obtainium-style extension manager for the Titanium Android browser",
+  "license": "GPL-2.0-only",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "build": "./build.sh"
+  },
+  "devDependencies": {
+    "fast-check": "^4.11.0"
+  }
+}
