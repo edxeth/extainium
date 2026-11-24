@@ -1,5 +1,6 @@
 import { trackedView } from "./lib/manager.js";
 import { friendly } from "./friendly.js";
+import { startTheme } from "./theme.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -61,13 +62,15 @@ async function render() {
   const attention = view.filter((v) => v.state === "identity-change");
   const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : "current";
   document.body.dataset.state = state;
-  $("summary").textContent = state === "empty"
+  const summary = state === "empty"
     ? "No tracked extensions"
     : state === "update"
       ? `${plural(updates.length, "update", "updates")} available`
       : state === "attention"
         ? `${plural(attention.length, "extension needs", "extensions need")} attention`
         : "All up to date";
+  // A live region: write only a changed headline, so a check with the same result is not read twice.
+  if ($("summary").textContent !== summary) $("summary").textContent = summary;
   $("emptyHint").hidden = state !== "empty";
   $("check").hidden = state === "empty";
   $("updates").replaceChildren(...updates.map(row), ...attention.map(attentionRow));
@@ -115,4 +118,5 @@ $("check").addEventListener("click", async () => {
 
 $("open").addEventListener("click", () => chrome.runtime.openOptionsPage());
 
+startTheme({ observe: false });
 render();

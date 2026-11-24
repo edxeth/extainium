@@ -41,10 +41,19 @@
   --pad: clamp(12px, 4vw, 24px);
 }
 
+/* Theme setting: theme-boot.js sets data-theme before the first paint; light-dark() follows color-scheme. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
 [hidden] { display: none !important; }
 *, *::before, *::after { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-padding-block-start: 128px; -webkit-font-smoothing: antialiased; }
+/* --toast-space: height of the visible toast plus its gaps (set by options.js), so focus
+   scrolling and the page end keep controls clear of it. */
+html {
+  -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-font-smoothing: antialiased;
+  scroll-padding-block: 128px var(--toast-space, 0px);
+}
 
 body {
   margin: 0;
@@ -152,7 +161,7 @@ button.danger:not(:disabled):active { background: color-mix(in oklab, var(--err)
 .options main {
   max-inline-size: 720px;
   margin-inline: auto;
-  padding: 16px var(--pad) calc(96px + env(safe-area-inset-bottom));
+  padding: 16px var(--pad) calc(max(96px, var(--toast-space, 0px) + 16px) + env(safe-area-inset-bottom));
 }
 
 .appbar {
@@ -371,6 +380,8 @@ button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant
   background: var(--line-strong); margin-block: -8px 8px;
 }
 .sheet-head h2 { overflow-wrap: anywhere; }
+/* Kept in the accessibility tree while empty (live region), out of the layout. */
+.sheet-head .error:empty { position: absolute; }
 .sheet-body { overflow: auto; overscroll-behavior: contain; padding: 12px 16px; display: grid; gap: 8px; align-content: start; }
 .sheet-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;

@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-page="options">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>Extainium</title>
+<script src="theme-boot.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="options">
@@ -42,8 +43,8 @@
     </div>
 
     <div id="panelTools" class="panel" role="tabpanel" aria-labelledby="tabTools" hidden>
-      <section class="group">
-        <h2>Install from file</h2>
+      <section class="group" aria-labelledby="fileHeading">
+        <h2 id="fileHeading">Install from file</h2>
         <label for="fileInput" class="label">Extension file (.crx or .zip)</label>
         <input type="file" id="fileInput" accept=".crx,.zip">
         <label for="fileKey" class="label">Sign a .zip with the key of</label>
@@ -62,8 +63,8 @@
         </div>
       </section>
 
-      <section class="group">
-        <h2>GitHub token</h2>
+      <section class="group" aria-labelledby="tokenHeading">
+        <h2 id="tokenHeading">GitHub token</h2>
         <form id="tokenForm">
           <label for="token" class="label">Personal access token (optional)</label>
           <div class="field">
@@ -75,8 +76,8 @@
         <p id="rateInfo" class="meta"></p>
       </section>
 
-      <section class="group">
-        <h2>Backup</h2>
+      <section class="group" aria-labelledby="backupHeading">
+        <h2 id="backupHeading">Backup</h2>
         <p class="hint warn">The export file contains the signing keys of your .zip-based extensions. Keep it private. Without these keys a reinstall gets a new extension ID and loses its data.</p>
         <div class="actions">
           <button id="export" class="btn">Export</button>
@@ -85,6 +86,15 @@
         </div>
         <div id="importResult" class="import-result" role="status"></div>
       </section>
+
+      <section class="group" aria-labelledby="themeHeading">
+        <h2 id="themeHeading">Theme</h2>
+        <select id="theme" aria-labelledby="themeHeading">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </section>
     </div>
   </main>
 
@@ -92,6 +102,7 @@
     <div class="sheet-head">
       <h2 id="pickerTitle">Choose asset</h2>
       <p id="pickerRelease" class="meta"></p>
+      <p id="pickerError" class="error" role="alert"></p>
     </div>
     <div id="pickerAssets" class="sheet-body"></div>
     <div class="sheet-foot">

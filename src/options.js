@@ -5,6 +5,7 @@ import {
 import { getRepo, getSettings, setSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
 import { friendly } from "./friendly.js";
+import { setTheme, startTheme } from "./theme.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -24,10 +25,29 @@ function h(tag, props = {}, ...children) {
 // #message (status) and #messageAlert (alert) are persistent live regions; the
 // toast hides by opacity, so they stay in the accessibility tree.
 let messageTimer = 0;
+// While the toast shows, --toast-space pads the page end and the scroll padding by its
+// height, so every control can be scrolled clear of it (and focus scrolling keeps clear).
+const toast = $("toast");
+function reserveToastSpace() {
+  const on = toast.classList.contains("show");
+  const gap = 24; // 12px below the toast + 12px above it
+  document.documentElement.style.setProperty("--toast-space", on ? `${Math.ceil(toast.offsetHeight) + gap}px` : "0px");
+}
+new ResizeObserver(reserveToastSpace).observe(toast);
+// The control the user just used must not sit under the toast it caused.
+function keepFocusClear() {
+  const el = document.activeElement;
+  if (!el || el === document.body || !toast.classList.contains("show")) return;
+  if (el.getBoundingClientRect().bottom > toast.getBoundingClientRect().top) el.scrollIntoView({ block: "nearest" });
+}
+let toastOrigin = null; // focused when the toast appeared; Dismiss returns focus there
 function showMessage(text, isError = false, detail = "") {
   clearTimeout(messageTimer);
   const on = !!text;
-  $("toast").classList.toggle("show", on);
+  toastOrigin = on ? document.activeElement : null;
+  toast.classList.toggle("show", on);
+  reserveToastSpace();
+  if (on) requestAnimationFrame(keepFocusClear);
   $("toast").classList.toggle("is-error", on && isError);
   $("messageClose").hidden = !on;
   $("message").replaceChildren(...(on && !isError ? [text] : []));
@@ -37,7 +57,11 @@ function showMessage(text, isError = false, detail = "") {
     messageTimer = setTimeout(hide, isError ? 15000 : 6000);
   }
 }
-$("messageClose").addEventListener("click", () => showMessage(""));
+$("messageClose").addEventListener("click", () => {
+  const back = toastOrigin;
+  showMessage("");
+  if (back && back.isConnected && back !== document.body) back.focus({ preventScroll: true });
+});
 
 // ---- tabs ----
 const tabs = [$("tabList"), $("tabTools")];
@@ -50,11 +74,20 @@ function selectTab(tab, focus = false) {
   }
   if (focus) tab.focus();
 }
+// A toast belongs to the tab it came from; switching tabs dismisses it, so it never
+// covers the other tab's controls.
+function switchTab(tab, focus) {
+  if (tab.getAttribute("aria-selected") !== "true") showMessage("");
+  selectTab(tab, focus);
+}
 for (const t of tabs) {
-  t.addEventListener("click", () => selectTab(t));
+  t.addEventListener("click", () => switchTab(t));
   t.addEventListener("keydown", (e) => {
-    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
-    if (step) selectTab(tabs[(tabs.indexOf(t) + step + tabs.length) % tabs.length], true);
+    const i = tabs.indexOf(t);
+    const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    switchTab(tabs[(to + tabs.length) % tabs.length], true);
   });
 }
 
@@ -71,8 +104,13 @@ const CHEVRON = "M6 9l6 6 6-6";
 
 // Screen-reader announcements for card progress and card errors: cards are
 // rebuilt on each render, so their own lines are not live regions.
+// Each region empties itself after a while, so browse mode does not find stale text later.
+const announceTimers = {};
 function announce(text, isError = false) {
-  $(isError ? "announceAlert" : "announce").textContent = text;
+  const id = isError ? "announceAlert" : "announce";
+  clearTimeout(announceTimers[id]);
+  $(id).textContent = text;
+  if (text) announceTimers[id] = setTimeout(() => ($(id).textContent = ""), 10000);
 }
 
 // A running action marks its button aria-disabled instead of disabled, so the
@@ -100,13 +138,16 @@ async function act(button, fn) {
   if (button) setBusy(button, true);
   focusMemo = ctlOf(button || document.activeElement);
   showMessage("");
+  $("pickerError").replaceChildren();
   try {
     const msg = await fn();
     if (msg) showMessage(msg);
   } catch (e) {
     console.error(e);
     const f = friendly(e);
-    showMessage(f.text, true, f.detail);
+    // The open sheet is modal: the toast would sit behind it, inert. Show the error in the sheet.
+    if ($("pickerSection").open) $("pickerError").replaceChildren(f.text, h("span", { className: "detail" }, f.detail));
+    else showMessage(f.text, true, f.detail);
   } finally {
     if (button) setBusy(button, false);
     await render();
@@ -179,10 +220,17 @@ function pickerRelease(record) {
 }
 
 // The picker is a modal bottom sheet; focus returns to the control that opened it.
+// opener: the element focused when the sheet opened; openerMemo finds the same control
+// on its rebuilt card when the original element is gone.
 let pickerOpener = null;
-function openPicker(key) {
-  pickerOpener = document.activeElement;
+let openerMemo = null;
+function queuePicker(key, opener = document.activeElement) {
+  pickerOpener = opener;
+  openerMemo = ctlOf(opener);
   picker = { key };
+}
+function openPicker(key) {
+  queuePicker(key);
   return renderPicker();
 }
 async function renderPicker() {
@@ -218,7 +266,10 @@ async function renderPicker() {
     ),
     ...(visible.length ? [] : [h("p", { className: "hint" }, "No .crx or .zip assets in this release.")])
   );
-  if (!sheet.open) sheet.showModal();
+  if (!sheet.open) {
+    $("pickerError").replaceChildren();
+    sheet.showModal();
+  }
 }
 
 $("pickerAll").addEventListener("change", renderPicker);
@@ -229,8 +280,14 @@ $("pickerCancel").addEventListener("click", () => {
 $("pickerSection").addEventListener("close", () => {
   picker = null;
   $("pickerSection").hidden = true;
-  if (pickerOpener && pickerOpener.isConnected) pickerOpener.focus();
+  // A chosen asset can remove the opener (Choose asset is primary only without a template):
+  // then the card's install button, else its More.
+  const card = openerMemo && $("list").querySelector(`[data-key="${CSS.escape(openerMemo.key)}"]`);
+  const again = card && (card.querySelector(`[data-ctl="${CSS.escape(openerMemo.ctl)}"]`) || card.querySelector('[data-ctl="install"], [data-ctl="more"]'));
+  const target = pickerOpener && pickerOpener.isConnected ? pickerOpener : again;
+  if (target) target.focus();
   pickerOpener = null;
+  openerMemo = null;
 });
 $("pickerSection").addEventListener("click", (e) => {
   if (e.target === e.currentTarget) $("pickerSection").close(); // tap on the backdrop
@@ -582,7 +639,7 @@ $("addForm").addEventListener("submit", (e) => {
   act(e.submitter, async () => {
     const key = await addRepo($("addInput").value);
     $("addInput").value = "";
-    picker = { key };
+    queuePicker(key, $("addInput"));
   });
 });
 
@@ -608,12 +665,15 @@ $("fileTrackForm").addEventListener("submit", (e) => {
     const key = await trackInstalledFile($("fileTrackInput").value, fileResult);
     $("fileTrack").hidden = true;
     $("fileTrackInput").value = "";
-    picker = { key };
+    queuePicker(key, $("fileInstall"));
     return `Tracking ${key}. Choose the release asset to follow.`;
   });
 });
 
 getSettings().then((s) => ($("token").value = s.githubToken));
+
+startTheme({ observe: true }).then((theme) => ($("theme").value = theme));
+$("theme").addEventListener("change", (e) => act(null, () => setTheme(e.target.value)));
 $("tokenForm").addEventListener("submit", (e) => {
   e.preventDefault();
   act(e.submitter, async () => {
