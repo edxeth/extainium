@@ -256,7 +256,7 @@ function avatar(record, ext) {
 // The identity-change notice: the release installs under another extension ID.
 function identityNotice(key, change, title) {
   return h("div", { className: "notice" },
-    h("p", {}, h("strong", {}, `${change.tag} installs as a separate extension.`),
+    h("p", {}, h("strong", {}, `${change.tag || change.asset} installs as a separate extension.`),
       " Its settings and data will not carry over from the installed one."),
     h("dl", { className: "facts" },
       h("dt", {}, "Current ID"), h("dd", {}, change.from),
@@ -594,7 +594,7 @@ $("fileInstall").addEventListener("click", (e) =>
     }
     const signWith = $("fileKey").value || null;
     fileResult = await installFile(new Uint8Array(await file.arrayBuffer()), file.name, signWith);
-    $("fileTrack").hidden = !!signWith;
+    $("fileTrack").hidden = !!fileResult.repoKey; // a CRX is never attached to the selected repo
     $("fileResult").textContent = `${fileResult.name} ${fileResult.installed.version} → ID ${fileResult.extensionId}.`;
     return "Confirm the browser prompt to add the extension.";
   })

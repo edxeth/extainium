@@ -52,7 +52,7 @@ function attentionRow(v) {
     h("div", { className: "row-text" },
       h("strong", {}, v.ext ? v.ext.name : v.key),
       h("span", { className: "versions-line attention" },
-        `${v.record.identityChange.tag} installs as a new extension. Review in Extainium.`)));
+        `${v.record.identityChange.tag || v.record.identityChange.asset} installs as a new extension. Review in Extainium.`)));
 }
 
 async function render() {
