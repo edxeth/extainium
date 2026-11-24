@@ -12,9 +12,46 @@ const RULES = [
     "GitHub rejected the token. Replace or clear it under Files & settings."],
   [/^fetch \S+ releases: HTTP (\d+)/, (m) =>
     `GitHub did not answer the request (HTTP ${m[1]}). Try again later.`],
-  // fetch() itself: offline, DNS, blocked
-  [/failed to fetch|networkerror|network error|load failed/i, () =>
-    "Cannot reach GitHub. Check the connection, then try again."],
+  // fetch() itself: offline, DNS, blocked. Names the server when the message says which.
+  [/failed to fetch|networkerror|network error|load failed/i, (m, ctx, raw) =>
+    `Cannot reach ${/google\.com|googleusercontent|\bcws\b|web ?store/i.test(raw) ? "the Chrome Web Store"
+      : /github/i.test(raw) || !/https?:\/\/|\burl:/.test(raw) ? "GitHub" : "the update server"}. Check the connection, then try again.`],
+
+  // ---- Sources (Chrome Web Store, self-hosted update URLs) ----
+  // The lib wording is taken from the contract (extainium-sources-contract.md) and may change:
+  // adjust these patterns to the final messages of src/lib (sources / cws / update URL code).
+  // The UI's own message when the permission prompt was declined (options.js requestOrigins).
+  [/^grant access: (.+) was not granted/, (m) =>
+    `Extainium was not allowed to reach ${m[1]}, so nothing changed. Try again and choose Allow.`],
+  // A check or install without the host permission (e.g. a record restored from a backup).
+  [/host permission|permission (?:for|to) \S+ (?:is )?(?:missing|not granted)|not (?:granted|permitted) (?:for|to)/i, () =>
+    "Extainium needs access to this extension's update server first. Tap Allow access on its card."],
+  // parseSourceInput
+  [/^parse (?:source|input)\b/, () =>
+    "Enter owner/repo, a github.com link, a Chrome Web Store link, or a 32-letter extension ID."],
+  // CWS updatecheck: status noupdate for v=0.0.0.0
+  [/not offered|noupdate/i, () =>
+    "The Chrome Web Store does not offer this extension to this browser. It may need a newer browser, still use Manifest V2, or be unlisted."],
+  // CWS install: the CRX lacks Google's publisher proof
+  [/publisher (?:proof|key)|not signed by (?:the )?(?:chrome )?web store/i, () =>
+    "This file is not signed by the Chrome Web Store, so it was not installed."],
+  // CRX ID differs from the record (cws and updateUrl installs)
+  [/(?:crx|extension) id (\S+) (?:does not match|differs from|is not) (?:the )?(?:record|tracked|expected)|id mismatch/i, () =>
+    "The download belongs to a different extension than the tracked one, so it was not installed."],
+  // codebase download: size or hash_sha256 differs
+  [/(?:cws|url):\S*.*(?:size|sha-?256|hash)\b.*(?:mismatch|does not match|differs|expected)/i, (m, ctx) =>
+    `The download or its check failed. Tap ${ctx.retry || "Update"} to retry.`],
+  // gupdate / updatecheck XML that does not parse strictly
+  [/(?:parse|read) (?:update ?check|gupdate|update (?:manifest|response|xml))|(?:cws|url):\S*.*(?:unknown (?:element|status)|truncated)/i, () =>
+    "The update server sent an answer Extainium cannot read. Try again later; if it stays, the extension's update feed has changed."],
+  // update server HTTP errors (cws or update_url)
+  [/^(?:check|fetch) (?:cws:|url:|update)\S*.*HTTP (\d+)/, (m) =>
+    `The update server did not answer (HTTP ${m[1]}). Try again later.`],
+  // linkInstalledToGithub on an extension that is gone
+  [/^link \S+: (?:the extension )?(\S+) is (?:not installed|no longer installed)/, (m) =>
+    `Extension ${m[1]} is no longer installed, so nothing was linked.`],
+  // ---- end of Sources ----
+
   // releases.js parseRepo
   [/^parse repo:/, () =>
     "Enter a repository as owner/repo or a github.com URL, for example gorhill/uBlock."],
@@ -64,7 +101,7 @@ export function friendly(err, ctx = {}) {
   const raw = String((err && err.message) || err || "");
   for (const [re, say] of RULES) {
     const m = raw.match(re);
-    if (m) return { text: say(m, ctx), detail: raw };
+    if (m) return { text: say(m, ctx, raw), detail: raw };
   }
   return { text: "Something unexpected went wrong. The details below help a bug report.", detail: raw };
 }

@@ -19,7 +19,15 @@ const plural = (n, one, many) => `${n} ${new Intl.PluralRules().select(n) === "o
 const when = (at) => new Date(at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 // Owner avatar with the installed extension's icon as a corner badge, as on the options cards.
-function avatar(record, ext) {
+function avatar(v) {
+  const { record, ext } = v;
+  // Store and self-hosted records have no owner picture: the extension icon is the image.
+  if ((v.source || "github") !== "github") {
+    const icon = ext && ext.icons && ext.icons.length ? [...ext.icons].sort((a, b) => b.size - a.size)[0].url : null;
+    const initial = h("span", { className: "fallback", hidden: !!icon, "aria-hidden": "true" }, (v.title || "?").slice(0, 1));
+    const img = icon ? h("img", { className: "owner", alt: "", width: 48, height: 48, src: icon, onerror: () => { img.hidden = true; initial.hidden = false; } }) : null;
+    return h("div", { className: "avatar" }, img, initial);
+  }
   const initial = h("span", { className: "fallback", hidden: true, "aria-hidden": "true" }, record.owner.slice(0, 1));
   const img = h("img", {
     className: "owner", alt: "", width: 48, height: 48, decoding: "async",
@@ -33,25 +41,30 @@ function avatar(record, ext) {
     icon ? h("img", { className: "ext", alt: "", width: 24, height: 24, src: icon, onerror: (e) => e.target.remove() }) : null);
 }
 
+const titleOf = (v) => (v.ext ? v.ext.name : v.title || v.key);
+
 function row(v) {
-  const pending = v.pendingInstall && v.pendingInstall.tag === v.latest.tag;
+  // github: the release tag; cws, updateUrl: the CRX version.
+  const latest = v.latest.tag || v.latest.version;
+  const pending = v.pendingInstall && (v.pendingInstall.tag === latest || v.pendingInstall.version === latest);
   return h("li", {},
-    avatar(v.record, v.ext),
+    avatar(v),
     h("div", { className: "row-text" },
-      h("strong", {}, v.ext ? v.ext.name : v.key),
+      h("strong", {}, titleOf(v)),
       h("span", { className: "versions-line" },
         h("span", { className: "visually-hidden" }, "Installed "), v.ext.version,
         h("span", { "aria-hidden": "true" }, " → "), h("span", { className: "visually-hidden" }, ", latest "),
-        h("span", { className: "to" }, v.latest.tag),
+        h("span", { className: "to" }, latest),
+        v.sourceLabel ? ` · ${v.sourceLabel}` : null,
         pending ? " · waiting for the browser" : null)));
 }
 
 // A release that would install as another extension: confirmed in Extainium.
 function attentionRow(v) {
   return h("li", {},
-    avatar(v.record, v.ext),
+    avatar(v),
     h("div", { className: "row-text" },
-      h("strong", {}, v.ext ? v.ext.name : v.key),
+      h("strong", {}, titleOf(v)),
       h("span", { className: "versions-line attention" },
         `${v.record.identityChange.tag || v.record.identityChange.asset} installs as a new extension. Review in Extainium.`)));
 }

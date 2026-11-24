@@ -17,6 +17,7 @@
     </div>
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" role="tab" id="tabList" aria-controls="panelList" aria-selected="true">Extensions</button>
+      <button class="tab" role="tab" id="tabInstalled" aria-controls="panelInstalled" aria-selected="false" tabindex="-1">Installed</button>
       <button class="tab" role="tab" id="tabTools" aria-controls="panelTools" aria-selected="false" tabindex="-1">Files &amp; settings</button>
     </nav>
     <!-- Messages that belong to no one control (Check all, Remove). Part of the sticky
@@ -35,11 +36,22 @@
   </header>
 
   <main>
+    <!-- Desktop only: the first install was refused because of a browser flag. -->
+    <section id="flagBanner" class="notice banner" aria-labelledby="flagTitle" hidden>
+      <h2 id="flagTitle">Installs need one browser setting</h2>
+      <p>This browser refused the install. Open <code id="flagPath">chrome://flags/#extension-mime-request-handling</code>, set it to <strong>Always prompt for install</strong>, then relaunch the browser.</p>
+      <div class="actions">
+        <button id="flagCopy" class="btn">Copy flag address</button>
+        <button id="flagDismiss" class="btn ghost">Dismiss</button>
+      </div>
+      <p id="flagStatus" class="inline-status"></p>
+    </section>
+
     <div id="panelList" class="panel" role="tabpanel" aria-labelledby="tabList">
       <form id="addForm" class="add">
-        <label for="addInput" class="label">Track a GitHub repository</label>
+        <label for="addInput" class="label">Track a GitHub repo or a Chrome Web Store extension</label>
         <div class="field">
-          <input type="text" id="addInput" aria-describedby="addStatus" placeholder="owner/repo or URL" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="go" required>
+          <input type="text" id="addInput" aria-describedby="addStatus" placeholder="owner/repo, link or store ID" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="go" required>
           <button class="btn primary">Add</button>
         </div>
         <p id="addStatus" class="inline-status"></p>
@@ -47,13 +59,18 @@
       <p id="checkInfo" class="meta"></p>
 
       <section aria-labelledby="listHeading">
-        <h2 id="listHeading" class="visually-hidden">Tracked repositories</h2>
+        <h2 id="listHeading" class="visually-hidden">Tracked extensions</h2>
         <div id="list"></div>
         <div id="empty" class="empty" hidden>
           <p class="empty-title">Nothing tracked yet</p>
-          <p>Add a repository above, for example <code>gorhill/uBlock</code>, then pick the .crx or .zip it publishes.</p>
+          <p>Add a repository above, for example <code>gorhill/uBlock</code>, or a Chrome Web Store link. Extensions you already have are listed under Installed.</p>
         </div>
       </section>
+    </div>
+
+    <div id="panelInstalled" class="panel" role="tabpanel" aria-labelledby="tabInstalled" hidden>
+      <p id="installedInfo" class="meta"></p>
+      <div id="installedList" class="installed"></div>
     </div>
 
     <div id="panelTools" class="panel" role="tabpanel" aria-labelledby="tabTools" hidden>
