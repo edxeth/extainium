@@ -31,6 +31,13 @@ const RULES = [
   // The UI's own message when the permission prompt was declined (options.js requestOrigins).
   [/^grant access: (.+) was not granted/, (m) =>
     `Extainium was not allowed to reach ${m[1]}, so nothing changed. Try again and choose Allow.`],
+  // net.js fetchFrom: the server redirects somewhere Extainium may not go.
+  [/(\S+) redirects to a host the browser does not name; there is no host permission for/, (m) =>
+    `${serverName(m[1])} forwards to another site this browser does not name. Allow Extainium to reach all sites when the browser asks, then check again.`],
+  [/(\S+) redirects to (\S+), and there is no host permission for (\S+(?:, \S+)*)$/, (m) =>
+    `${serverName(m[1])} forwards to ${m[2]}. Allow Extainium to reach ${m[3].split(", ").map(hostOf).join(" and ")} when the browser asks, then check again.`],
+  [/(\S+) redirects to (\S+), which is not an https URL/, (m) =>
+    `${serverName(m[1])} forwards to an address that is not https, so Extainium does not follow it.`],
   // check or install without the host permission (e.g. a record restored from a backup).
   [/: no host permission for (\S+(?:, \S+)*)$/, (m) =>
     `Extainium needs access to ${m[1].split(", ").map(hostOf).join(" and ")}, so nothing was checked or installed. Try again and choose Allow when the browser asks.`],

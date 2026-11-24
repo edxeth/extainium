@@ -1132,6 +1132,13 @@ $("importInput").addEventListener("change", (e) =>
 
 // Conflicts, warnings and check errors of the last import stay under Backup
 // until the next import.
+// lib import warning "<key>: extension <id> is already tracked as <other>; <key> was not imported"
+// in words; other warnings stay as the lib wrote them.
+function importWarning(w) {
+  const m = /^(\S+): extension \S+ is already tracked as (\S+); \S+ was not imported/.exec(w);
+  return m ? `${m[1]} was skipped: this extension is already tracked as ${m[2]}.` : w;
+}
+
 async function showImportResult({ count, errors, conflicts, warnings }) {
   // Conflicts carry the lowercase storage key; show owner/repo as written.
   const names = new Map((await trackedView()).map((v) => [v.key, v.record.owner ? `${v.record.owner}/${v.record.repo}` : v.title]));
@@ -1146,13 +1153,13 @@ async function showImportResult({ count, errors, conflicts, warnings }) {
       ? box(`Kept the current signing key for ${plural(conflicts.length, "repo", "repos")}`,
           conflicts.map((c) => `${names.get(c.key) || c.key}: kept ID ${c.keptId}. The backup had another key (ID ${c.backupId}), which was not imported.`))
       : null,
-    warnings.length ? box(plural(warnings.length, "warning", "warnings"), warnings) : null,
+    warnings.length ? box(plural(warnings.length, "warning", "warnings"), warnings.map(importWarning)) : null,
     errors.length
       ? box(`${plural(errors.length, "repo", "repos")} could not be checked`, errors.map(errorItem), "error error-list")
       : null,
   ].filter(Boolean);
   $("importResult").replaceChildren(
-    h("p", { className: "result-title" }, `Imported ${plural(count, "repo", "repos")}`, parts.length ? null : h("span", { className: "muted" }, " · no key conflicts")),
+    h("p", { className: "result-title" }, `Restored ${plural(count, "repo", "repos")}`, parts.length ? null : h("span", { className: "muted" }, " · no key conflicts")),
     ...parts);
 }
 
