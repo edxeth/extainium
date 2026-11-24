@@ -1,81 +1,109 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>Extainium</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="options">
-  <header class="row">
-    <h1>Extainium</h1>
-    <button id="checkAll">Check all</button>
+  <header class="appbar">
+    <div class="appbar-row">
+      <h1>Extainium</h1>
+      <span id="updateCount" class="count" hidden></span>
+      <button id="checkAll" class="btn">Check all</button>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab" role="tab" id="tabList" aria-controls="panelList" aria-selected="true">Extensions</button>
+      <button class="tab" role="tab" id="tabTools" aria-controls="panelTools" aria-selected="false" tabindex="-1">Files &amp; settings</button>
+    </nav>
   </header>
-  <p id="checkInfo" class="hint"></p>
-  <p id="message" class="message" hidden></p>
 
-  <section>
-    <h2>Add repository</h2>
-    <form id="addForm" class="field">
-      <input type="text" id="addInput" placeholder="owner/repo or GitHub URL" autocapitalize="off" autocomplete="off" spellcheck="false" required>
-      <button class="primary">Add</button>
-    </form>
-  </section>
-
-  <section id="pickerSection" hidden>
-    <h2 id="pickerTitle">Choose asset</h2>
-    <p id="pickerRelease" class="hint"></p>
-    <div id="pickerAssets"></div>
-    <label class="row"><span>Show all assets</span><input type="checkbox" id="pickerAll"></label>
-    <div class="row">
-      <button id="pickerCancel">Cancel</button>
-    </div>
-  </section>
-
-  <section>
-    <h2>Tracked</h2>
-    <div id="list"></div>
-    <p id="empty" class="hint" hidden>Nothing tracked yet. Add a GitHub repository above.</p>
-  </section>
-
-  <section>
-    <h2>Install from file</h2>
-    <div class="field">
-      <input type="file" id="fileInput" accept=".crx,.zip">
-    </div>
-    <label class="row"><span>Sign .zip with key of</span>
-      <select id="fileKey"><option value="">a new key</option></select>
-    </label>
-    <p class="hint">A .zip is packed into a CRX. Signing with a tracked repo's key installs it as that repo's extension (same ID, data kept).</p>
-    <div class="row"><button id="fileInstall" class="primary">Install</button></div>
-    <div id="fileTrack" hidden>
-      <p id="fileResult" class="hint"></p>
-      <form id="fileTrackForm" class="field">
-        <input type="text" id="fileTrackInput" placeholder="Track with owner/repo (optional)" autocapitalize="off" autocomplete="off" spellcheck="false" required>
-        <button>Track</button>
+  <main>
+    <div id="panelList" class="panel" role="tabpanel" aria-labelledby="tabList">
+      <form id="addForm" class="add">
+        <label for="addInput" class="label">Track a GitHub repository</label>
+        <div class="field">
+          <input type="text" id="addInput" placeholder="owner/repo or URL" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="go" required>
+          <button class="btn primary">Add</button>
+        </div>
       </form>
-    </div>
-  </section>
+      <p id="checkInfo" class="meta"></p>
 
-  <section>
-    <h2>Settings</h2>
-    <form id="tokenForm" class="field">
-      <input type="password" id="token" placeholder="GitHub token (optional)" autocomplete="off">
-      <button>Save</button>
-    </form>
-    <p class="hint">Raises the API limit from 60 to 5000 requests per hour. Kept in this browser only and sent only to api.github.com. A fine-grained token with no permissions is enough for public repos.</p>
-    <p id="rateInfo" class="hint"></p>
-  </section>
-
-  <section>
-    <h2>Backup</h2>
-    <div class="row">
-      <button id="export">Export</button>
-      <button id="import">Import</button>
-      <input type="file" id="importInput" accept=".json,application/json" hidden>
+      <section aria-label="Tracked repositories">
+        <div id="list"></div>
+        <div id="empty" class="empty" hidden>
+          <p class="empty-title">Nothing tracked yet</p>
+          <p>Add a repository above, for example <code>gorhill/uBlock</code>, then pick the .crx or .zip it publishes.</p>
+        </div>
+      </section>
     </div>
-    <p class="hint warn">The export file contains the signing keys of your .zip-based extensions. Keep it private. Without these keys a reinstall gets a new extension ID and loses its data.</p>
-  </section>
+
+    <div id="panelTools" class="panel" role="tabpanel" aria-labelledby="tabTools" hidden>
+      <section class="group">
+        <h2>Install from file</h2>
+        <label for="fileInput" class="label">Extension file (.crx or .zip)</label>
+        <input type="file" id="fileInput" accept=".crx,.zip">
+        <label for="fileKey" class="label">Sign a .zip with the key of</label>
+        <select id="fileKey"><option value="">a new key</option></select>
+        <p class="hint">Signing with a tracked repo's key installs the .zip as that repo's extension, with the same ID and data.</p>
+        <button id="fileInstall" class="btn primary">Install file</button>
+        <div id="fileTrack" class="subgroup" hidden>
+          <p id="fileResult" class="hint"></p>
+          <form id="fileTrackForm">
+            <label for="fileTrackInput" class="label">Track it with a repository (optional)</label>
+            <div class="field">
+              <input type="text" id="fileTrackInput" placeholder="owner/repo" autocapitalize="off" autocomplete="off" spellcheck="false" required>
+              <button class="btn">Track</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="group">
+        <h2>GitHub token</h2>
+        <form id="tokenForm">
+          <label for="token" class="label">Personal access token (optional)</label>
+          <div class="field">
+            <input type="password" id="token" placeholder="github_pat_…" autocomplete="off">
+            <button class="btn">Save</button>
+          </div>
+        </form>
+        <p class="hint">Raises the API limit from 60 to 5000 requests per hour. Kept in this browser and sent only to api.github.com. A fine-grained token with no permissions is enough for public repos.</p>
+        <p id="rateInfo" class="meta"></p>
+      </section>
+
+      <section class="group">
+        <h2>Backup</h2>
+        <p class="hint warn">The export file contains the signing keys of your .zip-based extensions. Keep it private. Without these keys a reinstall gets a new extension ID and loses its data.</p>
+        <div class="actions">
+          <button id="export" class="btn">Export</button>
+          <button id="import" class="btn">Import</button>
+          <input type="file" id="importInput" accept=".json,application/json" hidden>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="pickerSection" class="sheet" aria-labelledby="pickerTitle" hidden>
+    <div class="sheet-head">
+      <h2 id="pickerTitle">Choose asset</h2>
+      <p id="pickerRelease" class="meta"></p>
+    </div>
+    <div id="pickerAssets" class="sheet-body"></div>
+    <div class="sheet-foot">
+      <label class="switch"><input type="checkbox" id="pickerAll"><span>Show all assets</span></label>
+      <button id="pickerCancel" class="btn">Cancel</button>
+    </div>
+  </dialog>
+
+  <div class="toast" role="status" aria-live="polite">
+    <p id="message" class="message" hidden></p>
+    <button id="messageClose" class="btn ghost icon" aria-label="Dismiss message" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
 
   <script type="module" src="options.js"></script>
 </body>

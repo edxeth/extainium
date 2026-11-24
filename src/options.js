@@ -18,11 +18,50 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
+// Global toast. Results stay 6 s (longer while the tab is hidden); errors stay until dismissed.
+let messageTimer = 0;
 function showMessage(text, isError = false) {
+  clearTimeout(messageTimer);
   $("message").hidden = !text;
+  $("messageClose").hidden = !text;
   $("message").textContent = text || "";
   $("message").classList.toggle("error", isError);
+  if (text && !isError) {
+    const hide = () => (document.hidden ? (messageTimer = setTimeout(hide, 2000)) : showMessage(""));
+    messageTimer = setTimeout(hide, 6000);
+  }
 }
+$("messageClose").addEventListener("click", () => showMessage(""));
+
+// ---- tabs ----
+const tabs = [$("tabList"), $("tabTools")];
+function selectTab(tab, focus = false) {
+  for (const t of tabs) {
+    const on = t === tab;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+    $(t.getAttribute("aria-controls")).hidden = !on;
+  }
+  if (focus) tab.focus();
+}
+for (const t of tabs) {
+  t.addEventListener("click", () => selectTab(t));
+  t.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (step) selectTab(tabs[(tabs.indexOf(t) + step + tabs.length) % tabs.length], true);
+  });
+}
+
+const svg = (d) => {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  el.setAttribute("viewBox", "0 0 24 24");
+  el.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("d", d);
+  el.append(p);
+  return el;
+};
+const CHEVRON = "M6 9l6 6 6-6";
 
 // Runs a UI action: disables the button, reports errors, re-renders.
 async function act(button, fn) {
@@ -40,17 +79,21 @@ async function act(button, fn) {
   }
 }
 
-const formatDate = (iso) => (iso ? new Date(iso).toLocaleDateString() : "");
+const dateFormat = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
+const formatDate = (iso) => (iso ? dateFormat.format(new Date(iso)) : "");
+const pluralRules = new Intl.PluralRules("en");
+const plural = (n, one, other) => `${n} ${pluralRules.select(n) === "one" ? one : other}`;
 const formatSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.ceil(n / 1024) + " KB");
 
 const STATE_LABEL = {
-  "no-asset": "No matching asset",
-  ambiguous: "Several assets match",
+  "no-asset": "No asset",
+  ambiguous: "Ambiguous asset",
   "not-installed": "Not installed",
   update: "Update available",
   current: "Up to date",
-  unknown: "Cannot compare versions",
+  unknown: "Version unknown",
 };
+const extOf = (name) => (name.match(/\.(crx|zip)$/i) || [])[1];
 
 // Per-card progress and errors: key -> { busy, text, error }.
 const cardStatus = new Map();
@@ -84,18 +127,30 @@ function pickerRelease(record) {
   return releases.find((r) => r.assets.some((a) => isPackageAsset(a.name))) || releases.find((r) => r.assets.length) || null;
 }
 
+// The picker is a modal bottom sheet; focus returns to the control that opened it.
+let pickerOpener = null;
+function openPicker(key) {
+  pickerOpener = document.activeElement;
+  picker = { key };
+  return renderPicker();
+}
 async function renderPicker() {
-  $("pickerSection").hidden = !picker;
-  if (!picker) return;
+  const sheet = $("pickerSection");
+  sheet.hidden = !picker;
+  if (!picker) {
+    if (sheet.open) sheet.close();
+    return;
+  }
   const record = await getRepo(picker.key);
   const release = pickerRelease(record);
-  $("pickerTitle").textContent = `Choose asset for ${record.owner}/${record.repo}`;
+  $("pickerTitle").textContent = `Choose asset · ${record.owner}/${record.repo}`;
   if (!release) {
     $("pickerRelease").textContent = "No release with assets found.";
     $("pickerAssets").replaceChildren();
+    if (!sheet.open) sheet.showModal();
     return;
   }
-  $("pickerRelease").textContent = `From release ${release.tag} (${formatDate(release.publishedAt)}). Future releases use the same file name pattern.`;
+  $("pickerRelease").textContent = `Release ${release.tag} · ${formatDate(release.publishedAt)}. Later releases use the same file name pattern.`;
   const assets = [...release.assets].sort((a, b) => isPackageAsset(b.name) - isPackageAsset(a.name));
   const visible = $("pickerAll").checked ? assets : assets.filter((a) => isPackageAsset(a.name));
   $("pickerAll").parentElement.querySelector("span").textContent = `Show all assets (${assets.length})`;
@@ -107,10 +162,12 @@ async function renderPicker() {
           await chooseAsset(picker.key, a.name, release.tag);
           picker = null;
         }),
-      }, h("span", {}, a.name), h("span", { className: "muted" }, formatSize(a.size)))
+      }, h("span", { className: "name" }, extOf(a.name) ? h("span", { className: "kind" }, extOf(a.name)) : null, a.name),
+        h("span", { className: "muted" }, formatSize(a.size)))
     ),
-    visible.length ? null : h("p", { className: "hint" }, "No .crx or .zip assets in this release.")
+    ...(visible.length ? [] : [h("p", { className: "hint" }, "No .crx or .zip assets in this release.")])
   );
+  if (!sheet.open) sheet.showModal();
 }
 
 $("pickerAll").addEventListener("change", renderPicker);
@@ -118,10 +175,33 @@ $("pickerCancel").addEventListener("click", () => {
   picker = null;
   renderPicker();
 });
+$("pickerSection").addEventListener("close", () => {
+  picker = null;
+  $("pickerSection").hidden = true;
+  if (pickerOpener && pickerOpener.isConnected) pickerOpener.focus();
+  pickerOpener = null;
+});
+$("pickerSection").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) $("pickerSection").close(); // tap on the backdrop
+});
 
 // ---- tracked list ----
 
 const openDetails = new Set();
+
+function avatar(record, ext) {
+  const initial = h("span", { className: "fallback", hidden: true, "aria-hidden": "true" }, record.owner.slice(0, 1));
+  const img = h("img", {
+    className: "owner", alt: "", width: 48, height: 48, loading: "lazy", decoding: "async",
+    src: `https://github.com/${encodeURIComponent(record.owner)}.png?size=96`,
+    onerror: () => { img.hidden = true; initial.hidden = false; },
+  });
+  const icon = ext && ext.icons && ext.icons.length
+    ? [...ext.icons].sort((a, b) => b.size - a.size)[0].url
+    : null;
+  return h("div", { className: "avatar" }, img, initial,
+    icon ? h("img", { className: "ext", alt: "", width: 24, height: 24, src: icon, onerror: (e) => e.target.remove() }) : null);
+}
 
 function card(v) {
   const { key, record, latest, ext, state } = v;
@@ -129,69 +209,83 @@ function card(v) {
   const title = ext ? ext.name : record.repo;
   const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
   const canInstall = latest && latest.asset;
+  const failed = !!record.error;
 
-  const installedLine = ext
-    ? `Installed ${ext.version}${ext.enabled ? "" : " (disabled)"}`
-    : record.extensionId ? null : "Not linked to an extension yet";
-  const latestLine = latest
-    ? h("span", {}, `Latest ${latest.tag}${latest.release.prerelease ? " (pre-release)" : ""} · ${formatDate(latest.release.publishedAt)} · `,
-        h("a", { href: latest.release.htmlUrl, target: "_blank" }, "notes"))
-    : record.pattern ? "No release matches the pattern" : "No asset chosen";
+  const installed = ext
+    ? h("dd", {}, ext.version, ext.enabled ? null : h("span", { className: "sub" }, "disabled"))
+    : h("dd", {}, record.extensionId ? "Not installed" : "Not linked yet");
+  const latestDd = latest
+    ? h("dd", {}, latest.tag,
+        h("span", { className: "sub" },
+          formatDate(latest.release.publishedAt), latest.release.prerelease ? " · pre-release" : "", " · ",
+          h("a", { href: latest.release.htmlUrl, target: "_blank", rel: "noopener" }, "notes")))
+    : h("dd", {}, "—", h("span", { className: "sub" },
+        !record.releases ? "No release data yet" : record.pattern ? "No release matches the pattern" : "No asset chosen"));
 
   const details = h("details", {
     open: openDetails.has(key),
     ontoggle: (e) => (e.target.open ? openDetails.add(key) : openDetails.delete(key)),
   },
-    h("summary", {}, "More"),
-    h("form", {
-      className: "field",
-      onsubmit: (e) => {
-        e.preventDefault();
-        act(e.submitter, () => setPattern(key, e.target.elements.pattern.value.trim()));
+    h("summary", {}, h("span", {}, "More"), svg(CHEVRON)),
+    h("div", { className: "more" },
+      h("div", { className: "card-actions" },
+        h("button", { onclick: () => openPicker(key) }, "Choose asset"),
+        h("button", { onclick: (e) => act(e.currentTarget, () => checkRepo(key).then(refreshBadge)) }, "Check")),
+      h("form", {
+        onsubmit: (e) => {
+          e.preventDefault();
+          // Errors (e.g. an invalid regex) show on this card, next to the field's card.
+          const pattern = e.target.elements.pattern.value.trim();
+          cardAct(key, async () => { await setPattern(key, pattern); });
+        },
       },
-    },
-      h("input", { type: "text", name: "pattern", value: record.pattern || "", placeholder: "Asset name regex", spellcheck: false, autocapitalize: "off" }),
-      h("button", {}, "Save")),
-    h("p", { className: "hint" }, "Asset file name pattern (regex)."),
-    h("div", { className: "row" },
-      h("button", { onclick: () => { picker = { key }; renderPicker(); $("pickerSection").scrollIntoView(); } }, "Choose asset"),
-      h("button", { onclick: (e) => act(e.currentTarget, () => checkRepo(key).then(refreshBadge)) }, "Check")),
-    h("label", { className: "row" },
-      h("span", {}, "Include pre-releases"),
-      h("input", { type: "checkbox", checked: record.includePrereleases, onchange: (e) => act(null, () => setPrereleases(key, e.target.checked)) })),
-    olderReleases(key, record),
-    h("p", { className: "hint" },
-      `Extension ID: ${record.extensionId || "unknown"}`, h("br"),
-      `Signing: ${record.keyPkcs8 ? "own key (zip assets)" : "author's key (crx assets)"}`, h("br"),
-      `Checked: ${record.checkedAt ? new Date(record.checkedAt).toLocaleString() : "never"}`),
-    removeControls(key, record));
+        h("label", { className: "group-label", htmlFor: `pattern-${key}` }, "Asset file name pattern (regex)"),
+        h("div", { className: "field" },
+          h("input", { type: "text", id: `pattern-${key}`, name: "pattern", value: record.pattern || "", placeholder: "^name-.*\\.crx$", spellcheck: false, autocapitalize: "off", autocomplete: "off" }),
+          h("button", {}, "Save"))),
+      h("label", { className: "switch" },
+        h("input", { type: "checkbox", checked: record.includePrereleases, onchange: (e) => act(null, () => setPrereleases(key, e.target.checked)) }),
+        h("span", {}, "Include pre-releases")),
+      olderReleases(key, record),
+      h("dl", { className: "facts" },
+        h("dt", {}, "Extension ID"), h("dd", {}, record.extensionId || "unknown"),
+        h("dt", {}, "Signing"), h("dd", {}, record.keyPkcs8 ? "own key (zip assets)" : "author's key (crx assets)"),
+        latest && latest.asset ? [h("dt", {}, "Asset"), h("dd", {}, latest.asset.name)] : null,
+        h("dt", {}, "Checked"), h("dd", {}, record.checkedAt ? new Date(record.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never")),
+      removeControls(key, record)));
 
   return h("article", { className: `card state-${state}${status.busy ? " busy" : ""}`, "data-key": key, "aria-busy": String(!!status.busy) },
-    h("div", { className: "row" },
+    h("div", { className: "card-head" },
+      avatar(record, ext),
       h("div", { className: "title" },
         h("strong", {}, title),
-        h("a", { className: "muted", href: `https://github.com/${record.owner}/${record.repo}`, target: "_blank" }, `${record.owner}/${record.repo}`)),
-      h("span", { className: `state ${state}` }, STATE_LABEL[state])),
-    h("div", { className: "hint" }, installedLine, installedLine ? h("br") : null, latestLine,
-      latest && latest.asset ? [h("br"), `Asset ${latest.asset.name}`] : null),
+        h("a", { href: `https://github.com/${record.owner}/${record.repo}`, target: "_blank", rel: "noopener" }, `${record.owner}/${record.repo}`),
+        h("span", { className: `state ${state}${failed ? " failed" : ""}` }, failed ? "Error" : STATE_LABEL[state]))),
+    h("dl", { className: "versions" },
+      h("div", { className: "installed" }, h("dt", {}, "Installed"), installed),
+      h("div", { className: "latest" }, h("dt", {}, "Latest"), latestDd)),
     state === "ambiguous"
-      ? h("div", {}, h("p", { className: "hint" }, "Pick the asset to install:"),
-          latest.candidates.map((a) => h("button", { className: "asset", onclick: (e) => act(e.currentTarget, () => chooseAsset(key, a.name, latest.tag)) }, a.name)))
+      ? h("div", { className: "candidates" }, h("p", { className: "meta" }, "Several assets match. Pick the one to install:"),
+          latest.candidates.map((a) => h("button", { className: "asset", onclick: (e) => act(e.currentTarget, () => chooseAsset(key, a.name, latest.tag)) },
+            h("span", { className: "name" }, extOf(a.name) ? h("span", { className: "kind" }, extOf(a.name)) : null, a.name),
+            h("span", { className: "muted" }, formatSize(a.size)))))
       : null,
-    !record.pattern ? h("button", { className: "primary", onclick: () => { picker = { key }; renderPicker(); } }, "Choose asset") : null,
-    record.error ? h("p", { className: "error check-error" }, record.error) : null,
-    status.text ? h("p", { className: "card-status", role: "status" }, status.text) : null,
+    record.error ? h("p", { className: "error check-error", role: "alert" }, record.error) : null,
+    status.text ? h("p", { className: "card-status", role: "status" }, status.busy ? h("span", { className: "spinner", "aria-hidden": "true" }) : null, status.text) : null,
     status.error ? h("p", { className: "error card-error", role: "alert" }, status.error) : null,
-    h("div", { className: "row" },
-      canInstall
-        ? h("button", {
-            className: state === "update" || state === "not-installed" ? "primary" : "",
-            onclick: () => cardAct(key, async (progress) => {
-              const res = await installRelease(key, undefined, progress);
-              return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
-            }),
-          }, installLabel)
-        : null),
+    !record.pattern || canInstall
+      ? h("div", { className: "card-actions" },
+          !record.pattern ? h("button", { className: "primary", onclick: () => openPicker(key) }, "Choose asset") : null,
+          canInstall
+            ? h("button", {
+                className: state === "update" || state === "not-installed" ? "primary" : "",
+                onclick: () => cardAct(key, async (progress) => {
+                  const res = await installRelease(key, undefined, progress);
+                  return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
+                }),
+              }, installLabel)
+            : null)
+      : null,
     details);
 }
 
@@ -201,20 +295,22 @@ function olderReleases(key, record) {
     .filter((r) => matchAssets(r, record.pattern).length === 1)
     .map((r) => h("option", { value: r.tag }, `${r.tag}${r.prerelease ? " (pre)" : ""} · ${formatDate(r.publishedAt)}`));
   if (!options.length) return null;
-  const select = h("select", {}, options);
-  return h("div", { className: "field" }, select,
-    h("button", {
-      onclick: () => cardAct(key, async (progress) => {
-        const res = await installRelease(key, select.value, progress);
-        return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
-      }),
-    }, "Install this release"));
+  const select = h("select", { id: `release-${key}` }, options);
+  return h("div", {},
+    h("label", { className: "group-label", htmlFor: `release-${key}` }, "Install a specific release"),
+    h("div", { className: "field" }, select,
+      h("button", {
+        onclick: () => cardAct(key, async (progress) => {
+          const res = await installRelease(key, select.value, progress);
+          return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
+        }),
+      }, "Install")));
 }
 
 function removeControls(key, record) {
   const uninstall = h("input", { type: "checkbox" });
-  return h("div", { className: "row" },
-    record.extensionId ? h("label", {}, uninstall, " also uninstall extension") : h("span"),
+  return h("div", { className: "remove" },
+    record.extensionId ? h("label", { className: "switch" }, uninstall, h("span", {}, "Also uninstall the extension")) : h("span"),
     h("button", {
       className: "danger",
       onclick: (e) => act(e.currentTarget, async () => {
@@ -238,16 +334,19 @@ async function renderNow() {
   $("list").replaceChildren(...view.map(card));
   for (const b of $("list").querySelectorAll(".card.busy button")) b.disabled = true;
   $("empty").hidden = view.length > 0;
+  const updates = view.filter((v) => v.state === "update").length;
+  $("updateCount").hidden = !updates;
+  $("updateCount").textContent = plural(updates, "update", "updates");
   $("fileKey").replaceChildren(
     h("option", { value: "" }, "a new key"),
     ...view.filter((v) => v.record.keyPkcs8).map((v) => h("option", { value: v.key }, v.key))
   );
   const { lastCheck, rateLimit } = await chrome.storage.local.get(["lastCheck", "rateLimit"]);
   $("checkInfo").textContent = lastCheck
-    ? `Last check ${new Date(lastCheck.at).toLocaleString()}: ${lastCheck.updates} update(s)${lastCheck.errors.length ? `, ${lastCheck.errors.length} error(s)` : ""}`
+    ? `Last checked ${new Date(lastCheck.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
     : "Not checked yet. Checks run every 6 hours.";
   $("rateInfo").textContent = rateLimit
-    ? `GitHub API: ${rateLimit.remaining}/${rateLimit.limit} requests left, resets ${new Date(rateLimit.reset).toLocaleTimeString()}.`
+    ? `GitHub API: ${rateLimit.remaining}/${rateLimit.limit} requests left, resets ${new Date(rateLimit.reset).toLocaleTimeString(undefined, { timeStyle: "short" })}.`
     : "";
   await renderPicker();
 }
@@ -260,7 +359,7 @@ $("checkAll").addEventListener("click", (e) =>
     $("checkAll").textContent = "Checking…";
     try {
       const { updates, errors } = await checkAll();
-      return errors.length ? `Check finished with errors:\n${errors.join("\n")}` : `Check finished: ${updates} update(s).`;
+      return errors.length ? `Check finished with errors:\n${errors.join("\n")}` : `Check finished: ${plural(updates, "update", "updates")}.`;
     } finally {
       document.body.classList.remove("checking");
       $("checkAll").textContent = "Check all";
@@ -326,7 +425,7 @@ $("importInput").addEventListener("change", (e) =>
     e.target.value = "";
     if (!file) return;
     const { count, errors } = await importBackup(await file.text());
-    return `Imported ${count} repo(s).${errors.length ? `\nCheck errors:\n${errors.join("\n")}` : ""}`;
+    return `Imported ${plural(count, "repo", "repos")}.${errors.length ? `\nCheck errors:\n${errors.join("\n")}` : ""}`;
   })
 );
 
