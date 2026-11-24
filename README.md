@@ -58,7 +58,8 @@ as it does for any extension not installed from a store.
   not carry over.
 - Actions run one at a time across the options page, the popup and the
   background check. An action that has to wait says "Waiting for another
-  action…".
+  action…". While Titanium's Add or uninstall prompt is open, other actions
+  wait for your answer; closing the page releases them.
 
 ### How the install works on Titanium
 

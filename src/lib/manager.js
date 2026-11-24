@@ -502,6 +502,9 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
     const e = await getInstall(token);
     if (e) await putInstall({ ...e, downloadId });
   });
+  // Armed before the download: if this page closes mid-download, only a sweep
+  // resolves the entry (sweepDownloads re-arms itself while entries remain).
+  await armSweep();
   let failure = null;
   try {
     await installCrx(crx, `${manifest.name}-${manifest.version}`, { onStarted });
@@ -536,7 +539,7 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
   });
   // Not awaited: the install result does not wait for the cleanup retry.
   if (end && end.confirmedAt && !end.fileGone) retryDeletes([token]).catch((e) => console.error("[Extainium] delete CRX copy:", e));
-  await chrome.alarms.create(SWEEP_ALARM, { delayInMinutes: PENDING_GRACE_MS / 60000 + 0.5 });
+  await armSweep();
   if (failure) throw failure;
   return { token, promptAt: end ? end.promptAt : null, confirmed: !!(end && end.confirmedAt) };
 }
@@ -617,7 +620,15 @@ export async function sweepDownloads(now = Date.now()) {
       await storeInstall(e, now);
     }
     await deleteReleasedKeys(now);
+    // Entries whose copy is gone only wait for a late install event: no sweep needed.
+    if ((await listInstalls()).some((e) => !e.fileGone)) await armSweep();
   });
+}
+
+// Schedules the next sweepDownloads (the service worker runs it on SWEEP_ALARM);
+// re-creating the alarm moves it, so at most one is pending.
+function armSweep() {
+  return chrome.alarms.create(SWEEP_ALARM, { delayInMinutes: PENDING_GRACE_MS / 60000 + 0.5 });
 }
 
 // Turns a .crx or .zip into an installable CRX after checking the archive.

@@ -512,3 +512,27 @@ test("an interrupted replacement supersedes nothing: the earlier prompt's instal
   assert.equal((await trackedView())[0].record.installed.tag, "v1");
 });
 
+// Phone run 0.1.16: a hand-off whose page closed mid-download is resolved only
+// by a sweep. The hand-off arms the sweep when it starts, and a sweep that
+// leaves unresolved entries arms the next one, so nothing waits for the 6 h check.
+test("a hand-off arms the sweep alarm when it starts, and the sweep re-arms while entries remain", async () => {
+  const env = fakeChrome();
+  const { promise: started, resolve: enter } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  env.onDownloadStarted = async () => { enter(); await gate; };
+  const install = installFile(zip, "x.zip", null);
+  await started;
+  assert.ok(env.alarms.has(manager.SWEEP_ALARM), "armed before the download completes");
+
+  env.alarms.clear();
+  await sweepDownloads(Date.now());
+  assert.ok(env.alarms.has(manager.SWEEP_ALARM), "re-armed: the entry is still unresolved");
+  release();
+  await install;
+
+  env.alarms.clear();
+  await sweepDownloads(Date.now() + 2 * manager.PENDING_GRACE_MS + 1);
+  const open = Object.entries(env.store).filter(([k, e]) => k.startsWith("install:") && !e.fileGone);
+  assert.equal(open.length, 0, "every copy is deleted");
+  assert.ok(!env.alarms.has(manager.SWEEP_ALARM), "nothing left to clean: no further sweep");
+});

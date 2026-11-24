@@ -22,6 +22,7 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
     cancelled: [],
     uninstalled: [],
     badge: "",
+    alarms: new Map(), // name -> info of the last chrome.alarms.create
     hooks,
     nextDownloadId: 1,
     removeFileError: null, // Error to throw from removeFile, or null
@@ -75,7 +76,10 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       setBadgeBackgroundColor: async () => {},
       setBadgeText: async ({ text }) => { env.badge = text; },
     },
-    alarms: { create: async () => {}, get: async () => null },
+    alarms: {
+      create: async (name, info) => { env.alarms.set(name, info); },
+      get: async (name) => (env.alarms.has(name) ? { name, ...env.alarms.get(name) } : null),
+    },
     downloads: {
       download: async ({ url, filename }) => {
         const bytes = new Uint8Array(await (await nativeFetch(url)).arrayBuffer());
