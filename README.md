@@ -1,32 +1,55 @@
-# Titanium Extension for Android
+# Extainium
 
-[![Stars](https://img.shields.io/github/stars/jqssun/android-titanium-extension?label=Stars&logo=GitHub)](https://github.com/jqssun/android-titanium-extension)
-[![GitHub](https://img.shields.io/github/downloads/jqssun/android-titanium-extension/total?label=GitHub&logo=GitHub)](https://github.com/jqssun/android-titanium-extension/releases)
-[![license](https://img.shields.io/badge/License-GPLv2-blue.svg)](https://github.com/jqssun/android-titanium-extension/blob/main/LICENSE)
-[![build](https://img.shields.io/github/actions/workflow/status/jqssun/android-titanium-extension/build.yml)](https://github.com/jqssun/android-titanium-extension/actions/workflows/build.yml)
-[![release](https://img.shields.io/github/v/release/jqssun/android-titanium-extension)](https://github.com/jqssun/android-titanium-extension/releases)
+Install and update browser extensions from GitHub releases, the way
+[Obtainium](https://github.com/ImranR98/Obtainium) does for Android apps. Built for
+[Titanium Browser for Android](https://github.com/jqssun/android-titanium-browser).
 
-A fully open-source browser extension for [**Titanium Browser for Android**](https://github.com/jqssun/android-titanium-browser) as well as other Chromium-based browsers. This extension offers additional features for Chromium on Android, including support for securely installing extensions from alternative marketplaces, using external download managers, adding support for enhanced dark mode, and more.
+- Track a GitHub repo (`owner/repo` or any github.com URL of it), pick the release
+  asset (`.crx` or `.zip`) once; a file-name pattern finds it in later releases.
+- See installed vs. latest version, release date and notes; a check runs every 6
+  hours (and on demand), and the toolbar badge counts available updates.
+- Install or update with one tap. A `.crx` keeps its author's key and extension ID.
+  A `.zip` is packed into a CRX signed with a key Extainium creates once per repo,
+  so updates keep the same extension ID and its data.
+- Install a local `.crx`/`.zip` and optionally track it with a repo.
+- Export/import the list, including the per-repo signing keys.
 
-> [!NOTE]
-> You can also use this on other browsers with support for extensions, although official support is only provided for [**Titanium Browser for Android**](https://github.com/jqssun/android-titanium-browser). Support for installing extensions from alternative marketplaces on other browsers requires a patched [`download_crx_util.cc`](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/download/download_crx_util.cc).
+## How it installs
 
-## Usage
+Titanium allows off-store CRX installs when the download is started by an
+extension page. Extainium downloads the CRX through `chrome.downloads`; Titanium
+then shows its "Add extension?" prompt. The CRX copy in Downloads is deleted after
+the install, or two minutes after a declined or failed one.
 
-### Installation
+## Privacy
 
-Download the packed extension from [Releases](https://github.com/jqssun/android-titanium-extension/releases/latest/download/titanium.zip) and extract it to a folder. In [**Titanium Browser for Android**](https://github.com/jqssun/android-titanium-browser) or any other Chromium-based browser with support for extensions, open **Manage extensions** or [`chrome://extensions`](chrome://extensions), enable **Developer mode**, select **Load unpacked**, and choose the unpacked extension folder.
+Extainium talks to `api.github.com` and GitHub's release download hosts only. An
+optional GitHub token (raises the API limit from 60 to 5000 requests per hour) is
+kept in `chrome.storage.local` and sent only to `api.github.com`. The backup file
+contains the signing keys of your `.zip`-based extensions: keep it private.
+Without those keys a reinstall gets a new extension ID and loses its data.
 
-### Getting Extensions from Alternative Marketplaces
+## Build
 
-[**Titanium Browser for Android**](https://github.com/jqssun/android-titanium-browser) can install Chrome extensions from the [Chrome Web Store](https://chromewebstore.google.com/) with **Desktop site** enabled. For other marketplaces, you can use this extension. Once installed, downloading extensions from the following marketplaces is supported:
-- [Opera Add-ons](https://addons.opera.com/)
-- [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/)
+```sh
+npm install
+npm test        # node --test, pure logic in src/lib
+./build.sh      # dist/extainium.zip and dist/extainium.crx
+```
 
-You can also manually download the extension by going to **Extension options**. Copy the extension's marketplace page URL and paste it into the relevant URL field. Select **Get** to download the extension file. If no install prompt appears, unzip the downloaded extension file and load it unpacked.
+`build.sh` signs the CRX with `~/.config/extainium/extainium.pem` (or
+`$EXTAINIUM_PEM`) and creates that key, mode 600, if it is missing. The key fixes
+Extainium's own extension ID; keep it to publish updates.
 
-### Using External Download Managers
+Layout: `src/lib/` holds the logic as ES modules shared by the extension and the
+tests (`crx.js` CRX3 parse/pack/ID, `zip.js`, `releases.js` repo parsing,
+versions, asset patterns and update state, `github.js` API access, `store.js`
+storage and backup, `install.js`, `manager.js` operations). `src/options.*` and
+`src/popup.*` are the UI.
 
-You must first configure the download manager in **Extension options**. You can choose from a list of supported download managers using the application preset, or manually set the package ID as well as the intent format used by the download manager. The configured package ID must match the installed variant of the application exactly.
+## Credits and license
 
-Once configured, browser downloads can be forwarded to any external download manager via `intent://` when redirect is enabled. Alternatively, you can long-press a link to access the context menu and select **Download with download manager** to manually send a URL to the download manager.
+Extainium is a fork of the
+[Titanium extension](https://github.com/jqssun/android-titanium-extension) by
+jqssun, whose CRX3 packer and zip handling it builds on. GPL-2.0, see
+[LICENSE](LICENSE).
