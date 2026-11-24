@@ -19,7 +19,8 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
-// Global toast. Results stay 6 s (longer while the tab is hidden); errors stay until dismissed.
+// Global toast. Results stay 6 s, errors 15 s (both longer while the tab is hidden), so an
+// error never keeps covering the controls under it; card errors stay on their cards.
 // #message (status) and #messageAlert (alert) are persistent live regions; the
 // toast hides by opacity, so they stay in the accessibility tree.
 let messageTimer = 0;
@@ -31,9 +32,9 @@ function showMessage(text, isError = false, detail = "") {
   $("messageClose").hidden = !on;
   $("message").replaceChildren(...(on && !isError ? [text] : []));
   $("messageAlert").replaceChildren(...(on && isError ? [text, detail ? h("span", { className: "detail" }, detail) : ""] : []));
-  if (text && !isError) {
+  if (text) {
     const hide = () => (document.hidden ? (messageTimer = setTimeout(hide, 2000)) : showMessage(""));
-    messageTimer = setTimeout(hide, 6000);
+    messageTimer = setTimeout(hide, isError ? 15000 : 6000);
   }
 }
 $("messageClose").addEventListener("click", () => showMessage(""));
@@ -460,6 +461,7 @@ function removeControls(key, record, hasKey, name, title) {
         return;
       }
       disarm(key);
+      announce(""); // drop "Tap again to delete the key." once the second tap is in
       act(e.currentTarget, async () => {
         // With uninstall, the browser's own dialog confirms.
         if (!uninstall.checked && !confirm(`Remove ${name}?\n\n${removeText(false, hasKey)}`)) return;
