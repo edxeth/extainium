@@ -1,4 +1,5 @@
 import { trackedView } from "./lib/manager.js";
+import { friendly } from "./friendly.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -80,23 +81,36 @@ async function render() {
   $("lastCheck").hidden = !$("lastCheck").textContent;
 }
 
+// #error is a persistent alert region; it is empty when there is nothing to say.
 function showErrors(errors) {
-  $("error").hidden = !errors.length;
+  if (!errors.length) return $("error").replaceChildren();
+  if (errors.length > 1) {
+    return $("error").replaceChildren(
+      h("strong", {}, `${errors.length} checks failed. Open Extainium to see which.`));
+  }
+  const f = friendly(errors[0]);
   $("error").replaceChildren(
-    h("strong", {}, errors.length > 1 ? `${errors.length} checks failed` : "Check failed"),
-    h("span", {}, errors.join("\n")));
+    h("strong", {}, "Check failed"), h("span", {}, f.text), h("span", { className: "detail" }, f.detail));
 }
 
+// aria-disabled, not disabled, so the button keeps focus while the check runs.
 $("check").addEventListener("click", async () => {
-  $("check").disabled = true;
-  $("check").setAttribute("aria-busy", "true");
-  $("check").textContent = "Checking…";
-  const res = await chrome.runtime.sendMessage({ type: "check" });
-  showErrors(res.error ? [res.error] : res.errors);
-  $("check").disabled = false;
-  $("check").removeAttribute("aria-busy");
-  $("check").textContent = "Check now";
-  await render();
+  const button = $("check");
+  if (button.getAttribute("aria-disabled") === "true") return;
+  button.setAttribute("aria-disabled", "true");
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "Checking…";
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "check" });
+    showErrors(res.error ? [res.error] : res.errors);
+  } catch (e) {
+    showErrors([e.message]);
+  } finally {
+    button.removeAttribute("aria-disabled");
+    button.removeAttribute("aria-busy");
+    button.textContent = "Check all";
+    await render();
+  }
 });
 
 $("open").addEventListener("click", () => chrome.runtime.openOptionsPage());

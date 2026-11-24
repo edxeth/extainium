@@ -31,7 +31,8 @@
       </form>
       <p id="checkInfo" class="meta"></p>
 
-      <section aria-label="Tracked repositories">
+      <section aria-labelledby="listHeading">
+        <h2 id="listHeading" class="visually-hidden">Tracked repositories</h2>
         <div id="list"></div>
         <div id="empty" class="empty" hidden>
           <p class="empty-title">Nothing tracked yet</p>
@@ -82,7 +83,7 @@
           <button id="import" class="btn">Import</button>
           <input type="file" id="importInput" accept=".json,application/json" hidden>
         </div>
-        <div id="importResult" class="import-result" role="status" hidden></div>
+        <div id="importResult" class="import-result" role="status"></div>
       </section>
     </div>
   </main>
@@ -99,8 +100,14 @@
     </div>
   </dialog>
 
-  <div class="toast" role="status" aria-live="polite">
-    <p id="message" class="message" hidden></p>
+  <div id="announce" class="visually-hidden" role="status"></div>
+  <div id="announceAlert" class="visually-hidden" role="alert"></div>
+
+  <div id="toast" class="toast">
+    <div class="message">
+      <p id="message" role="status"></p>
+      <p id="messageAlert" role="alert"></p>
+    </div>
     <button id="messageClose" class="btn ghost icon" aria-label="Dismiss message" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
     </button>

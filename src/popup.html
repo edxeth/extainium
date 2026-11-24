@@ -65,10 +65,11 @@
   .versions-line.attention { color: var(--warn); font-weight: 600; }
 
   .pop .hint { color: var(--muted); }
-  .visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .error-box { background: var(--err-tint); border-radius: var(--r-md); padding: 12px; display: grid; gap: 4px; }
   .error-box strong { font-size: var(--fs-base); }
-  .error-box[hidden] { display: none; }
+  .error-box .detail { font-size: var(--fs-xs); color: var(--muted); }
+  /* Empty: stays in the accessibility tree as a live region, out of the grid. */
+  .error-box:empty { position: absolute; padding: 0; }
 
   .pop .actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .pop .actions > button { flex: 1 1 140px; }
@@ -95,9 +96,9 @@
   </div>
   <p id="emptyHint" class="hint" hidden>Track a GitHub repository in Extainium to see its updates here.</p>
   <ul id="updates" class="rows" aria-label="Updates and items to review"></ul>
-  <div id="error" class="error error-box" role="alert" hidden></div>
+  <div id="error" class="error error-box" role="alert"></div>
   <div class="actions">
-    <button id="check">Check now</button>
+    <button id="check">Check all</button>
     <button id="open" class="primary">Open Extainium</button>
   </div>
 </main>

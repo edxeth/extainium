@@ -66,6 +66,7 @@ code { font-size: 0.9em; }
 svg { inline-size: 20px; block-size: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ---- text roles ---- */
 .meta, .hint, .muted { color: var(--muted); }
@@ -73,6 +74,7 @@ svg { inline-size: 20px; block-size: 20px; fill: none; stroke: currentColor; str
 .hint { max-inline-size: 65ch; }
 .warn { color: var(--warn); }
 .error { color: var(--err); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.error .detail { display: block; margin-block-start: 4px; font-size: var(--fs-xs); color: var(--muted); }
 .label { display: block; font-size: var(--fs-sm); font-weight: 600; margin-block-end: 4px; }
 
 /* ---- controls ---- */
@@ -122,7 +124,7 @@ button.primary { background: var(--accent); color: var(--accent-fg); }
 button.danger { background: var(--err-tint); color: var(--err); }
 button.ghost { background: transparent; color: var(--muted); }
 button.icon { padding: 0; inline-size: var(--tap); }
-button:disabled { opacity: 0.55; cursor: progress; }
+button:disabled, button[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 button:not(:disabled):active { background: var(--surface-3); }
 button.primary:not(:disabled):active { background: color-mix(in oklab, var(--accent), var(--fg) 18%); }
 button.danger:not(:disabled):active { background: color-mix(in oklab, var(--err) 26%, var(--surface)); }
@@ -244,8 +246,13 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
   background: var(--surface); padding: 2px; box-shadow: 0 0 0 1px var(--line);
 }
 .card .title { flex: 1; min-inline-size: 0; display: grid; gap: 2px; }
-.card .title strong { font-size: var(--fs-lg); line-height: 1.3; overflow-wrap: break-word; }
-.card .title a { font-size: var(--fs-sm); color: var(--muted); text-decoration: none; overflow-wrap: break-word; justify-self: start; min-inline-size: 0; max-inline-size: 100%; }
+.card .title h3 { margin: 0; font-size: var(--fs-lg); font-weight: 600; line-height: 1.3; overflow-wrap: break-word; text-wrap: balance; }
+/* 44px tap target; the negative margin keeps the title block compact. */
+.card .title a {
+  display: inline-flex; align-items: center; min-block-size: var(--tap); margin-block: -8px;
+  font-size: var(--fs-sm); color: var(--muted); text-decoration: none; overflow-wrap: anywhere;
+  justify-self: start; min-inline-size: 0; max-inline-size: 100%;
+}
 .card .title .state { justify-self: start; margin-block-start: 4px; }
 @media (hover: hover) and (pointer: fine) { .card .title a:hover { text-decoration: underline; color: var(--accent); } }
 
@@ -268,13 +275,13 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .versions dd .sub { display: block; font-weight: 400; font-size: var(--fs-sm); color: var(--muted); }
 .state-update .versions .latest dd { color: var(--accent); }
 
+/* Progress and pending lines: neutral, so the accent tint keeps meaning "update available". */
 .card-status {
   display: flex; align-items: center; gap: 8px;
-  font-size: var(--fs-sm); color: var(--accent); font-weight: 600;
-  background: var(--accent-tint); border-radius: var(--r-md); padding: 8px 12px; overflow-wrap: anywhere;
+  font-size: var(--fs-sm); color: var(--fg);
+  background: var(--surface-2); border-radius: var(--r-md); padding: 8px 12px; overflow-wrap: anywhere;
 }
 .card .error { background: var(--err-tint); border-radius: var(--r-md); padding: 8px 12px; }
-.card-status.idle { color: var(--fg); background: var(--surface-2); font-weight: 400; }
 
 /* A to-do or warning that needs the user: identity change, asset to choose again, import conflicts. */
 .notice {
@@ -287,6 +294,7 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .notice ul, .error-list ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; }
 .error-list { display: grid; gap: 8px; background: var(--err-tint); border-radius: var(--r-md); padding: 12px; }
 .error-list strong { color: var(--fg); }
+.error-list .detail { margin-block-start: 0; }
 .field-hint { margin-block-start: 4px; }
 .card.busy::before {
   content: ""; position: absolute; inset-inline: 0; inset-block-start: 0; block-size: 3px;
@@ -305,6 +313,8 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
   min-block-size: var(--tap); padding: 8px 16px; color: var(--muted); font-weight: 600; font-size: var(--fs-sm);
 }
 .card summary::-webkit-details-marker { display: none; }
+/* The card clips overflow, so the ring sits inside the summary. */
+.card summary:focus-visible { outline-offset: -2px; }
 .card summary svg { transition: none; }
 .card details[open] summary svg { transform: rotate(180deg); }
 @media (hover: hover) and (pointer: fine) { .card summary:hover { color: var(--fg); background: var(--surface-2); } }
@@ -327,7 +337,7 @@ button.asset {
 }
 button.asset .name { overflow-wrap: anywhere; min-inline-size: 0; }
 button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.kind { font-size: var(--fs-xs); font-weight: 600; padding: 4px; line-height: 1; border-radius: var(--r-sm); background: var(--accent-tint); color: var(--accent); margin-inline-end: 8px; text-transform: uppercase; }
+.kind { font-size: var(--fs-xs); font-weight: 600; padding: 4px; line-height: 1; border-radius: var(--r-sm); background: var(--surface-2); color: var(--fg); margin-inline-end: 8px; text-transform: uppercase; letter-spacing: 0.05em; }
 @media (hover: hover) and (pointer: fine) { button.asset:not(:disabled):hover { background: var(--surface-2); border-color: var(--line-strong); } }
 
 /* ---- tools panel ---- */
@@ -341,6 +351,8 @@ button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant
 .actions > button { flex: 1 1 120px; }
 .hint.warn { color: var(--fg); background: var(--warn-tint); border-radius: var(--r-md); padding: 12px; }
 .import-result { display: grid; gap: 8px; margin-block-start: 8px; }
+/* Kept in the accessibility tree while empty (live region), out of the layout. */
+.import-result:empty { position: absolute; margin: 0; }
 .result-title { font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ---- bottom sheet ---- */
@@ -382,16 +394,17 @@ html:has(.sheet[open]) { overflow: hidden; }
   background: var(--fg); color: var(--bg); border-radius: var(--r-md);
   padding: 4px 4px 4px 16px; box-shadow: var(--shadow-toast);
 }
-.toast:not(:has(#message:not([hidden]))) { display: none; }
-.toast .message { flex: 1; padding-block: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); max-block-size: 40dvh; overflow: auto; }
-.toast:has(.message.error) { background: var(--err); color: var(--on-err); }
+/* Hidden by opacity, not display, so its live regions stay in place. */
+.toast:not(.show) { opacity: 0; transform: translateY(8px); pointer-events: none; }
+.toast .message { flex: 1; padding-block: 10px; overflow-wrap: anywhere; font-size: var(--fs-sm); max-block-size: 40dvh; overflow: auto; }
+.toast .message p { white-space: pre-wrap; }
+.toast .detail { display: block; margin-block-start: 4px; font-size: var(--fs-xs); color: inherit; opacity: 0.85; }
+.toast.is-error { background: var(--err); color: var(--on-err); }
 .toast button.ghost { color: inherit; }
 @media (hover: hover) and (pointer: fine) { .toast button.ghost:hover { background: color-mix(in oklab, currentColor 14%, transparent); color: inherit; } }
-/* Enters by transition (retargets when a new message replaces the old one). */
 .toast { transition: opacity 200ms var(--ease-out), transform 200ms var(--ease-out); }
-@starting-style { .toast { opacity: 0; transform: translateY(8px); } }
 @media (prefers-reduced-motion: reduce) {
   .toast { transition-property: opacity; }
-  @starting-style { .toast { transform: none; } }
+  .toast:not(.show) { transform: none; }
 }
 
