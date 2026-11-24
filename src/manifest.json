@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Extainium",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Install and update browser extensions from GitHub releases (.crx or .zip), like Obtainium does for apps. Built for Titanium on Android.",
   "permissions": [
     "downloads",
