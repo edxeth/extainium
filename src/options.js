@@ -1,7 +1,8 @@
 import {
-  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, fileKeysView, forgetFileKey,
-  importBackup, installFile, installRelease, isPromptWaiting, refreshBadge, removeRepo, saveBackup, setGithubToken,
-  setPrereleases, setTemplate, trackInstalledFile, trackedView, whenQueued,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, environment, fileKeysView, forgetFileKey,
+  importBackup, installFile, installRelease, installedOverview, isPromptWaiting, linkInstalledToGithub, refreshBadge,
+  removeRepo, saveBackup, setGithubToken, setPrereleases, setTemplate, trackInstalled, trackInstalledFile, trackedView,
+  whenQueued,
 } from "./lib/manager.js";
 import { getRepo, getSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
@@ -61,7 +62,7 @@ new ResizeObserver(([e]) =>
 ).observe(document.querySelector(".appbar"));
 
 // ---- tabs ----
-const tabs = [$("tabList"), $("tabTools")];
+const tabs = [$("tabList"), $("tabInstalled"), $("tabTools")];
 function selectTab(tab, focus = false) {
   for (const t of tabs) {
     const on = t === tab;
@@ -240,6 +241,18 @@ const uninstallChoice = new Map();
 // Remove with uninstall and a signing key needs a second tap: key -> timer.
 const removeArmed = new Map();
 
+// chrome.permissions.request needs the user gesture: call this synchronously in the click
+// handler, before any await, and await the promise it returns inside the action.
+// origins: the lib's needsOrigins for the record or the installed extension ([] when granted).
+function requestOrigins(origins) {
+  if (!origins || !origins.length) return Promise.resolve();
+  const asked = chrome.permissions.request({ origins });
+  return asked.then((granted) => {
+    if (!granted) throw new Error(`grant access: ${origins.map(hostOf).join(", ")} was not granted`);
+  });
+}
+const hostOf = (origin) => origin.replace(/^[a-z]+:\/\//, "").replace(/\/\*?$/, "");
+
 // ---- asset picker ----
 
 let picker = null; // { key }
@@ -329,7 +342,18 @@ $("pickerSection").addEventListener("click", (e) => {
 
 const openDetails = new Set();
 
-function avatar(record, ext) {
+const extIcon = (ext) => (ext && ext.icons && ext.icons.length ? [...ext.icons].sort((a, b) => b.size - a.size)[0].url : null);
+
+// GitHub cards show the owner's picture with the extension icon as a corner badge; store and
+// self-hosted cards have no owner picture, so the extension's own icon is the main image.
+function avatar(v) {
+  const { record, ext } = v;
+  if ((v.source || "github") !== "github") {
+    const icon = extIcon(ext);
+    const initial = h("span", { className: "fallback", hidden: !!icon, "aria-hidden": "true" }, (v.title || "?").slice(0, 1));
+    const img = icon ? h("img", { className: "owner", alt: "", width: 48, height: 48, src: icon, onerror: () => { img.hidden = true; initial.hidden = false; } }) : null;
+    return h("div", { className: "avatar" }, img, initial);
+  }
   const initial = h("span", { className: "fallback", hidden: true, "aria-hidden": "true" }, record.owner.slice(0, 1));
   const img = h("img", {
     className: "owner", alt: "", width: 48, height: 48, loading: "lazy", decoding: "async",
@@ -373,15 +397,21 @@ function pendingLine(pending) {
 const errorLine = (className, { text, detail }) =>
   h("p", { className: `error ${className}` }, text, detail && detail !== text ? h("span", { className: "detail" }, detail) : null);
 
+const STORE_LINK = { cws: "Store page", updateUrl: "Update feed" };
+const checkedAt = (record) => (record.checkedAt ? new Date(record.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never");
+
 function card(v) {
   const { key, record, latest, ext, state, pendingInstall } = v;
   const status = cardStatus.get(key) || {};
-  const title = ext ? ext.name : record.repo;
-  const name = `${record.owner}/${record.repo}`;
+  // github: a release asset with a template; cws, updateUrl: one CRX per version, no asset controls.
+  const github = (v.source || "github") === "github";
+  const title = ext ? ext.name : github ? record.repo : v.title;
+  const name = github ? `${record.owner}/${record.repo}` : title;
+  const needs = v.needsOrigins || [];
   const titleId = `title-${key}`;
   const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
   const identity = state === "identity-change";
-  const canInstall = latest && latest.asset && !identity;
+  const canInstall = github ? latest && latest.asset && !identity : !!latest;
   // A migration that could not convert the pattern asks for the asset again: a
   // to-do on the "No asset" card, not a failed check. Once a template is set it is stale.
   const converted = isConversionError(record.error);
@@ -391,7 +421,12 @@ function card(v) {
   const installed = ext
     ? h("dd", {}, ext.version, ext.enabled ? null : h("span", { className: "sub" }, "disabled"))
     : h("dd", {}, record.extensionId ? "Not installed" : "Not linked yet");
-  const latestDd = latest
+  const latestDd = !github
+    ? latest
+      ? h("dd", {}, latest.version, latest.size ? h("span", { className: "sub" }, formatSize(latest.size)) : null)
+      : h("dd", {}, "—", h("span", { className: "sub" },
+          state === "not-offered" ? "Not offered to this browser" : record.checkedAt ? "No version found" : "Not checked yet"))
+    : latest
     ? h("dd", {}, latest.tag,
         h("span", { className: "sub" },
           formatDate(latest.release.publishedAt), latest.release.prerelease ? " · pre-release" : "", " · ",
@@ -407,18 +442,39 @@ function card(v) {
   // Typed text survives renders, also when the lib rejects the template.
   if (templateDraft.has(key)) templateInput.value = templateDraft.get(key);
 
-  const details = h("details", {
+  // Check (and Allow access) first ask for the hosts the record still needs, in the click itself.
+  const check = (e) => {
+    const asked = requestOrigins(needs);
+    act(e.currentTarget, async () => {
+      await asked;
+      await checkRepo(key).then(refreshBadge).catch((err) => {
+        // checkRepo stores the error on the record, so the card's check-error line shows it.
+        announce(friendly(err, { retry: "Check" }).text, true);
+      });
+    }, { card: key });
+  };
+  const checkButton = h("button", { "data-ctl": "check", "aria-label": `Check ${title}`, onclick: check }, "Check");
+  const summary = h("summary", { "data-ctl": "more", "aria-label": `More for ${title}` }, h("span", {}, "More"), svg(CHEVRON));
+  const detailsProps = {
     open: openDetails.has(key),
     ontoggle: (e) => (e.target.open ? openDetails.add(key) : openDetails.delete(key)),
-  },
-    h("summary", { "data-ctl": "more", "aria-label": `More for ${title}` }, h("span", {}, "More"), svg(CHEVRON)),
+  };
+
+  const details = !github
+    ? h("details", detailsProps, summary,
+        h("div", { className: "more" },
+          h("div", { className: "card-actions" }, checkButton),
+          h("dl", { className: "facts" },
+            h("dt", {}, "Source"), h("dd", {}, v.sourceLabel),
+            h("dt", {}, "Extension ID"), h("dd", {}, record.extensionId || record.id || "unknown"),
+            v.source === "updateUrl" ? [h("dt", {}, "Update URL"), h("dd", {}, v.sourceUrl)] : null,
+            h("dt", {}, "Checked"), h("dd", {}, checkedAt(record))),
+          removeControls(key, record, false, name, title)))
+    : h("details", detailsProps, summary,
     h("div", { className: "more" },
       h("div", { className: "card-actions" },
         h("button", { "data-ctl": "choose", "aria-label": `Choose asset for ${title}`, onclick: () => openPicker(key) }, "Choose asset"),
-        h("button", { "data-ctl": "check", "aria-label": `Check ${title}`, onclick: (e) => act(e.currentTarget, () => checkRepo(key).then(refreshBadge).catch((err) => {
-          // checkRepo stores the error on the record, so the card's check-error line shows it.
-          announce(friendly(err, { retry: "Check" }).text, true);
-        }), { card: key }) }, "Check")),
+        checkButton),
       h("form", {
         onsubmit: (e) => {
           e.preventDefault();
@@ -443,15 +499,19 @@ function card(v) {
         h("dt", {}, "Extension ID"), h("dd", {}, record.extensionId || "unknown"),
         h("dt", {}, "Signing"), h("dd", {}, v.hasKey ? "own key (zip assets)" : "author's key (crx assets)"),
         latest && latest.asset ? [h("dt", {}, "Asset"), h("dd", {}, latest.asset.name)] : null,
-        h("dt", {}, "Checked"), h("dd", {}, record.checkedAt ? new Date(record.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never")),
+        h("dt", {}, "Checked"), h("dd", {}, checkedAt(record))),
       removeControls(key, record, v.hasKey, name, title)));
 
-  return h("article", { className: `card state-${state}${status.busy ? " busy" : ""}`, "data-key": key, "aria-busy": String(!!status.busy), "aria-labelledby": titleId },
+  // id: the Installed tab's "Tracked" link targets the card.
+  return h("article", { className: `card state-${state}${status.busy ? " busy" : ""}`, id: cardId(key), tabIndex: -1, "data-key": key, "aria-busy": String(!!status.busy), "aria-labelledby": titleId },
     h("div", { className: "card-head" },
-      avatar(record, ext),
+      avatar(v),
       h("div", { className: "title" },
         h("h3", { id: titleId }, title),
-        h("a", { href: `https://github.com/${name}`, target: "_blank", rel: "noopener", "data-ctl": "repo" }, name),
+        h("p", { className: "source-line" },
+          h("span", { className: "source" }, v.sourceLabel || "GitHub"),
+          h("a", { href: github ? `https://github.com/${name}` : v.sourceUrl, target: "_blank", rel: "noopener", "data-ctl": "repo",
+            "aria-label": github ? null : `${STORE_LINK[v.source]} of ${title}` }, github ? name : STORE_LINK[v.source])),
         h("span", { className: `state ${state}${failed ? " failed" : ""}` }, failed ? "Error" : STATE_LABEL[state]))),
     h("dl", { className: "versions" },
       h("div", { className: "installed" }, h("dt", {}, "Installed"), installed),
@@ -464,19 +524,32 @@ function card(v) {
       : null,
     converted && !record.template ? h("p", { className: "notice" }, record.error) : null,
     identity ? identityNotice(key, record.identityChange, title) : null,
+    needs.length
+      ? h("div", { className: "notice" },
+          h("p", {}, `Extainium needs access to ${needs.map(hostOf).join(", ")} to check ${title} for updates.`),
+          h("div", { className: "card-actions" },
+            h("button", { "data-ctl": "grant", "aria-label": `Allow access for ${title}`, onclick: check }, "Allow access")))
+      : null,
     checkError ? errorLine("check-error", friendly(checkError, { retry: "Check" })) : null,
     status.text ? h("p", { className: "card-status" }, status.busy ? h("span", { className: "spinner", "aria-hidden": "true" }) : null, status.text) : null,
     !status.busy && !status.text && pendingInstall ? pendingLine(pendingInstall) : null,
     status.error ? errorLine("card-error", status.error) : null,
-    !record.template || canInstall
+    (github && !record.template) || canInstall
       ? h("div", { className: "card-actions" },
-          !record.template ? h("button", { className: "primary", "data-ctl": "choose-main", "aria-label": `Choose asset for ${title}`, onclick: () => openPicker(key) }, "Choose asset") : null,
+          github && !record.template ? h("button", { className: "primary", "data-ctl": "choose-main", "aria-label": `Choose asset for ${title}`, onclick: () => openPicker(key) }, "Choose asset") : null,
           canInstall
             ? h("button", {
                 className: state === "update" || state === "not-installed" ? "primary" : "",
                 "data-ctl": "install", "aria-label": `${installLabel} ${title}`,
                 // The card then shows the pending install until the browser confirms it.
-                onclick: () => cardAct(key, (progress) => installRelease(key, undefined, progress).then(() => null), installLabel),
+                onclick: () => {
+                  const asked = requestOrigins(needs);
+                  cardAct(key, async (progress) => {
+                    await asked;
+                    await installRelease(key, undefined, progress);
+                    return null;
+                  }, installLabel);
+                },
               }, installLabel)
             : null)
       : null,
@@ -506,7 +579,7 @@ function removeText(uninstall, hasKey) {
   if (uninstall) {
     return hasKey
       ? "Remove uninstalls the extension. Its signing key is deleted once no install waiting at the browser prompt uses it, within about 2 minutes. Installing it again later gives it a new ID and none of its data."
-      : "Remove uninstalls the extension and stops tracking the repo.";
+      : "Remove uninstalls the extension and stops tracking it.";
   }
   return hasKey
     ? "Remove stops tracking. The extension stays installed, and its signing key is kept: adding the repo again installs updates under the same ID, and exports still include the key."
@@ -521,7 +594,7 @@ function disarm(key) {
 
 function removeControls(key, record, hasKey, name, title) {
   const id = `remove-hint-${key}`;
-  const canUninstall = !!record.extensionId;
+  const canUninstall = !!(record.extensionId || record.id);
   const checked = canUninstall && !!uninstallChoice.get(key);
   const hint = h("p", { className: "hint", id }, removeText(checked, hasKey));
   const label = () => (removeArmed.has(key) ? "Tap again to delete the key" : uninstall.checked ? "Remove and uninstall" : "Remove");
@@ -571,6 +644,223 @@ function removeControls(key, record, hasKey, name, title) {
     hint);
 }
 
+const cardId = (key) => `card-${key.replace(/[^a-z0-9_-]/gi, "-")}`;
+
+// ---- Installed tab ----
+// Every installed extension, grouped by kind, each row with one action: Track (store or own
+// update server), Link a GitHub repo (no update source), a link to its card (tracked), or
+// none (provided by the browser).
+
+let env = { platform: "android", installNeedsFlag: false }; // replaced by environment() at start
+const installedStatus = new Map(); // extension id -> { busy, text, error }
+const linkOpen = new Set(); // ids whose "Link a GitHub repo" form is open
+const linkDraft = new Map(); // id -> typed text, kept across renders
+
+const GROUPS = [
+  ["cws", "Chrome Web Store"],
+  ["selfUpdating", "Updated from their own server"],
+  ["unmanaged", "No update source"],
+  ["tracked", "Tracked by Extainium"],
+  ["browser", "Provided by the browser"],
+];
+// Group hints only where they add a fact the rows do not show.
+function groupHint(kind) {
+  const selfUpdates = env.platform !== "desktop";
+  if (kind === "cws" || kind === "selfUpdating") {
+    return selfUpdates
+      ? "The browser updates these itself. Track one to see its updates in Extainium too."
+      : "This browser does not update these. Track one to get its updates.";
+  }
+  if (kind === "unmanaged") return "Link the GitHub repo that publishes one to get its updates.";
+  if (kind === "browser") return "Installed by the browser or by policy. Extainium cannot update them.";
+  return null;
+}
+const BROWSER_SOURCE = { admin: "Installed by policy", sideload: "Installed by another program" };
+
+function installedSource(x, tracked) {
+  if (x.kind === "tracked") return (tracked && tracked.sourceLabel) || "Tracked";
+  if (x.kind === "cws") return "Chrome Web Store";
+  if (x.kind === "selfUpdating") return x.updateHost || "Own update server";
+  if (x.kind === "unmanaged") return "No update source";
+  return BROWSER_SOURCE[x.installType] || "Part of the browser";
+}
+
+function showCard(key) {
+  selectTab($("tabList"));
+  const el = document.getElementById(cardId(key));
+  if (el) {
+    el.scrollIntoView({ block: "start" });
+    el.focus({ preventScroll: true });
+  }
+}
+
+// Runs an action of one installed row; its result shows under the row (the row moves to
+// "Tracked by Extainium" after Track, and keeps its status there).
+async function rowAct(id, button, fn) {
+  setBusy(button, true);
+  installedStatus.set(id, { busy: true, text: "Working…" });
+  await renderInstalledNow();
+  const wait = () => {
+    installedStatus.set(id, { busy: true, text: WAITING });
+    renderInstalledNow();
+    return () => installedStatus.set(id, { busy: true, text: "Working…" });
+  };
+  try {
+    const text = await whenQueued(wait, fn);
+    installedStatus.set(id, { text });
+    announce(text);
+  } catch (e) {
+    console.error(e);
+    const error = friendly(e);
+    installedStatus.set(id, { error });
+    announce(error.text, true);
+  }
+  setBusy(button, false);
+  await render();
+}
+
+function installedRow(x, trackedByKey) {
+  const tracked = x.trackedKey ? trackedByKey.get(x.trackedKey) : null;
+  const status = installedStatus.get(x.id) || {};
+  const icon = x.icon;
+  const initial = h("span", { className: "fallback", hidden: !!icon, "aria-hidden": "true" }, (x.name || "?").slice(0, 1));
+  const img = icon ? h("img", { className: "icon", alt: "", width: 32, height: 32, src: icon, onerror: () => { img.hidden = true; initial.hidden = false; } }) : null;
+  const nameId = `ext-name-${x.id}`;
+
+  let action = null;
+  if (x.kind === "tracked" && x.trackedKey) {
+    action = h("a", {
+      className: "row-link", href: `#${cardId(x.trackedKey)}`, "data-ctl": "open", "aria-label": `Tracked: show the card of ${x.name}`,
+      onclick: (e) => { e.preventDefault(); showCard(x.trackedKey); },
+    }, "Tracked", svg("M9 6l6 6-6 6"));
+  } else if (x.canTrack === "cws" || x.canTrack === "updateUrl") {
+    action = h("button", {
+      "data-ctl": "track", "aria-label": `Track ${x.name}`,
+      onclick: (e) => {
+        // The permission prompt needs this click: ask before anything awaits.
+        const asked = requestOrigins(x.needsOrigins);
+        rowAct(x.id, e.currentTarget, async () => {
+          await asked;
+          await trackInstalled(x.id);
+          return `Tracking ${x.name}. Its updates show on the Extensions tab.`;
+        });
+      },
+    }, "Track");
+  } else if (x.canTrack === "github") {
+    const open = linkOpen.has(x.id);
+    action = h("button", {
+      "data-ctl": "link-toggle", "aria-expanded": String(open), "aria-controls": `link-${x.id}`,
+      "aria-label": `Link a GitHub repo to ${x.name}`,
+      onclick: () => {
+        open ? linkOpen.delete(x.id) : linkOpen.add(x.id);
+        installedStatus.delete(x.id);
+        renderInstalledNow().then(() => {
+          const el = document.querySelector(`[data-id="${CSS.escape(x.id)}"] ${open ? '[data-ctl="link-toggle"]' : 'input'}`);
+          if (el) el.focus();
+        });
+      },
+    }, open ? "Cancel" : "Link repo");
+  }
+
+  const linkForm = x.canTrack === "github" && linkOpen.has(x.id)
+    ? h("form", {
+        className: "link-form", id: `link-${x.id}`,
+        onsubmit: (e) => {
+          e.preventDefault();
+          const input = e.target.elements.repo;
+          const text = input.value.trim();
+          rowAct(x.id, e.submitter, async () => {
+            const key = await linkInstalledToGithub(x.id, text);
+            linkOpen.delete(x.id);
+            linkDraft.delete(x.id);
+            // As after Add: choose the release asset to follow. Focus returns to the row.
+            queuePicker(key, document.querySelector(`[data-id="${CSS.escape(x.id)}"]`));
+            return `Linked ${x.name} to ${text}. Choose the release asset to follow.`;
+          });
+        },
+      },
+        h("label", { className: "label", htmlFor: `link-input-${x.id}` }, "GitHub repository"),
+        h("div", { className: "field" },
+          h("input", {
+            type: "text", id: `link-input-${x.id}`, name: "repo", "data-ctl": "link-input", placeholder: "owner/repo or URL", required: true,
+            autocapitalize: "off", autocomplete: "off", spellcheck: false, enterkeyhint: "go",
+            value: linkDraft.get(x.id) || "", oninput: (e) => linkDraft.set(x.id, e.target.value),
+          }),
+          h("button", { className: "primary", "data-ctl": "link" }, "Link")))
+    : null;
+
+  return h("li", { className: `ext-row${status.busy ? " busy" : ""}`, "data-id": x.id, "aria-labelledby": nameId },
+    h("div", { className: "ext-main" },
+      h("div", { className: "ext-icon" }, img, initial),
+      h("div", { className: "row-text" },
+        h("strong", { id: nameId }, x.name),
+        h("span", { className: "meta" },
+          h("span", { className: "version" }, x.version), " · ", installedSource(x, tracked),
+          x.enabled ? null : " · disabled")),
+      action),
+    linkForm,
+    status.text ? h("p", { className: "card-status" }, status.busy ? h("span", { className: "spinner", "aria-hidden": "true" }) : null, status.text) : null,
+    status.error ? errorLine("card-error", status.error) : null);
+}
+
+let installedRendering = Promise.resolve();
+function renderInstalledNow() {
+  installedRendering = installedRendering.then(renderInstalledInner, renderInstalledInner);
+  return installedRendering;
+}
+async function renderInstalledInner() {
+  const [list, view] = await Promise.all([installedOverview(), trackedView()]);
+  const trackedByKey = new Map(view.map((v) => [v.key, v]));
+  // Rows are rebuilt: focus goes back to the same control of the same row, or to its
+  // replacement (Track -> Tracked, Link -> Link repo).
+  const active = document.activeElement;
+  const row = active && active.closest && active.closest("#installedList [data-id]");
+  const memo = row ? { id: row.dataset.id, ctl: active.dataset.ctl } : installedFocus;
+  const groups = GROUPS.map(([kind, label]) => {
+    const rows = list.filter((x) => x.kind === kind).sort((a, b) => a.name.localeCompare(b.name));
+    if (!rows.length) return null;
+    const hint = groupHint(kind);
+    const headingId = `group-${kind}`;
+    return h("section", { className: "ext-group", "aria-labelledby": headingId },
+      h("h2", { id: headingId }, label, h("span", { className: "group-count" }, String(rows.length))),
+      hint ? h("p", { className: "hint" }, hint) : null,
+      h("ul", { className: "ext-rows" }, rows.map((x) => installedRow(x, trackedByKey))));
+  }).filter(Boolean);
+  $("installedList").replaceChildren(...groups);
+  $("installedInfo").textContent = list.length ? plural(list.length, "extension installed", "extensions installed") : "No other extensions are installed.";
+  for (const b of $("installedList").querySelectorAll(".ext-row.busy button")) setBusy(b, true);
+  if (memo && !(active && active.isConnected)) {
+    const r = $("installedList").querySelector(`[data-id="${CSS.escape(memo.id)}"]`);
+    const el = r && (r.querySelector(`[data-ctl="${CSS.escape(memo.ctl || "")}"]`) || r.querySelector('[data-ctl="open"], [data-ctl="track"], [data-ctl="link-toggle"]'));
+    if (el) el.focus({ preventScroll: true });
+  }
+}
+let installedFocus = null;
+$("installedList").addEventListener("focusin", (e) => {
+  const r = e.target.closest("[data-id]");
+  installedFocus = r ? { id: r.dataset.id, ctl: e.target.dataset.ctl } : null;
+});
+
+// ---- desktop flag banner ----
+// Shown once: when installs need the browser flag and the lib saw an install refused.
+const FLAG_DISMISSED = "extainium.flagBannerDismissed";
+function renderBanner(view) {
+  $("flagBanner").hidden = !(env.installNeedsFlag && view.installBlocked && !localStorage.getItem(FLAG_DISMISSED));
+}
+$("flagCopy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("flagPath").textContent);
+    say("flagStatus", "Copied. Paste it into the address bar.");
+  } catch (e) {
+    say("flagStatus", "Copying was refused. Select the address above and copy it.", true, e.message);
+  }
+});
+$("flagDismiss").addEventListener("click", () => {
+  localStorage.setItem(FLAG_DISMISSED, String(Date.now()));
+  $("flagBanner").hidden = true;
+  $("tabList").focus();
+});
+
 let rendering = Promise.resolve();
 function render() {
   rendering = rendering.then(renderNow, renderNow);
@@ -597,7 +887,7 @@ function scheduleGrace(view) {
 function renderKeyChoice(view, fileKeys) {
   const select = $("fileKey");
   const chosen = select.value;
-  const repoKeys = view.filter((v) => v.hasKey).map((v) => h("option", { value: v.key }, `${v.record.owner}/${v.record.repo}`));
+  const repoKeys = view.filter((v) => v.hasKey && v.record.owner).map((v) => h("option", { value: v.key }, `${v.record.owner}/${v.record.repo}`));
   const files = fileKeys.map((f) => h("option", { value: f.value },
     f.name ? `${f.name} ${f.version} · ${f.extensionId}` : `Not installed · ${f.extensionId}`));
   select.replaceChildren(
@@ -615,6 +905,7 @@ async function renderNow() {
   const active = document.activeElement;
   const memo = ctlOf(active) || (!active || active === document.body ? focusMemo : null);
   $("list").replaceChildren(...view.map(card));
+  renderBanner(view);
   // Busy cards keep their buttons focusable; the click guard ignores them.
   for (const b of $("list").querySelectorAll(".card.busy button")) setBusy(b, true);
   if (memo && !(active && active.isConnected)) {
@@ -642,6 +933,7 @@ async function renderNow() {
       ? `GitHub API: ${rateLimit.remaining}/${rateLimit.limit} requests left, resets ${resetAt}.`
       : `GitHub API: the limit reset at ${resetAt}; ${rateLimit.limit} requests per hour are available again.`;
   if (rateLimit && rateLimit.reset > Date.now()) rateTimer = setTimeout(render, Math.min(rateLimit.reset - Date.now() + 1000, 2 ** 31 - 1));
+  await renderInstalledNow();
   await renderPicker();
 }
 
@@ -670,7 +962,8 @@ $("addForm").addEventListener("submit", (e) => {
   act(e.submitter, async () => {
     const key = await addRepo($("addInput").value);
     $("addInput").value = "";
-    queuePicker(key, $("addInput"));
+    // A GitHub repo next asks for its release asset; store records (cws:<id>) have none.
+    if (!/^(?:cws|url):/.test(key)) queuePicker(key, $("addInput"));
   }, "addStatus");
 });
 
@@ -814,7 +1107,7 @@ $("importInput").addEventListener("change", (e) =>
 // until the next import.
 async function showImportResult({ count, errors, conflicts, warnings }) {
   // Conflicts carry the lowercase storage key; show owner/repo as written.
-  const names = new Map((await trackedView()).map((v) => [v.key, `${v.record.owner}/${v.record.repo}`]));
+  const names = new Map((await trackedView()).map((v) => [v.key, v.record.owner ? `${v.record.owner}/${v.record.repo}` : v.title]));
   const box = (title, items, className = "notice") =>
     h("div", { className }, h("strong", {}, title), h("ul", {}, items.map((t) => h("li", {}, t))));
   const errorItem = (e) => {
@@ -839,7 +1132,7 @@ async function showImportResult({ count, errors, conflicts, warnings }) {
 // Re-render on background changes, but not while the user types in the list.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  const typing = document.activeElement && document.activeElement.matches("#list input[type=text]");
+  const typing = document.activeElement && document.activeElement.matches("#list input[type=text], #installedList input[type=text]");
   if (!typing) render();
 });
 chrome.management.onInstalled.addListener((info) => {
@@ -848,4 +1141,8 @@ chrome.management.onInstalled.addListener((info) => {
 });
 chrome.management.onUninstalled.addListener(() => render());
 
-render();
+Promise.resolve(environment()).then((e) => {
+  env = e;
+  document.body.dataset.platform = e.platform;
+  render();
+});
