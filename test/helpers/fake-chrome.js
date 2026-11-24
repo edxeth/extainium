@@ -103,10 +103,16 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
         for (const o of origins) env.granted.add(o);
         return true;
       },
+      remove: async ({ origins = [] }) => {
+        // Chromium refuses to remove a required host permission.
+        if (origins.some((o) => REQUIRED_HOSTS.includes(o))) throw new Error("You cannot remove required permissions.");
+        for (const o of origins) env.granted.delete(o);
+        return true;
+      },
     },
     runtime: {
       get id() { return env.runtimeId; },
-      getManifest: () => ({ manifest_version: 3, name: "Extainium", version: env.manifestVersion }),
+      getManifest: () => ({ manifest_version: 3, name: "Extainium", version: env.manifestVersion, host_permissions: [...REQUIRED_HOSTS] }),
       getPlatformInfo: async () => ({ os: env.platformOs, arch: "arm64" }),
     },
     // Without a "webRequest" permission (or on a browser without the API) a test deletes it.

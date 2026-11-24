@@ -1,5 +1,6 @@
 import {
-  SWEEP_ALARM, checkAll, confirmOwnInstall, handleExtensionInstalled, reconcileInstalls, refreshBadge, sweepDownloads, trackSelf,
+  SWEEP_ALARM, checkAll, confirmOwnInstall, handleExtensionInstalled, reconcileInstalls, refreshBadge, releaseUnusedOrigins,
+  sweepDownloads, trackSelf,
 } from "./lib/manager.js";
 
 const ALARM = "check-updates";
@@ -24,10 +25,12 @@ const reconcile = (startedAt = null) => step("reconcile installs", () => reconci
 // On desktop, Extainium follows its own update URL unless the user removed it (Titanium updates it itself).
 const selfTrack = step("track Extainium itself", trackSelf);
 const sweep = step("sweep downloads", () => sweepDownloads());
+// Gives back optional host permissions no record needs (also those left by older versions).
+const releaseHosts = step("release unused host permissions", releaseUnusedOrigins);
 
 // The badge text does not survive a browser restart or an extension update.
 chrome.runtime.onInstalled.addListener((details) =>
-  confirmSelf(details).then(() => reconcile()).then(ensureAlarm).then(selfTrack).then(refreshBadge));
+  confirmSelf(details).then(() => reconcile()).then(ensureAlarm).then(selfTrack).then(releaseHosts).then(refreshBadge));
 // A start is no install event: a version that changed since a hand-off is reconcile's evidence.
 chrome.runtime.onStartup.addListener(() => {
   const startedAt = Date.now();

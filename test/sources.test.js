@@ -20,7 +20,7 @@ import {
 
 const {
   addRepo, checkAll, checkRepo, dismissInstallBlocked, environment, exportBackup, importBackup, installFile, installRelease,
-  installedOverview, linkInstalledToGithub, setTemplate, trackInstalled, trackedView,
+  installedOverview, linkInstalledToGithub, removeRepo, setTemplate, trackInstalled, trackedView,
 } = manager;
 
 const JB_KEY = `cws:${JUST_BLACK}`;
@@ -740,4 +740,27 @@ test("a version 4 backup with a malformed source entry is refused naming the ent
   }
   await assert.rejects(importBackup(JSON.stringify({ ...base, sources: [{ source: "cws", id: JUST_BLACK }, { source: "cws", id: JUST_BLACK }] })), /sources #2 \(cws:\w+\): listed twice/);
   await assert.rejects(importBackup(JSON.stringify(base)), /^Error: import backup: sources is not a list$/);
+});
+
+// Phone run 0.1.20: removing the last store record left Extainium holding Google's
+// hosts. Optional host permissions no record needs any more are given back.
+test("removing the last record that needs an optional host gives that permission back; others stay", async () => {
+  const env = profile();
+  fakeGithub([]);
+  const OTHER = "a".repeat(32);
+  fakeUpdateServers({ cws: { [JUST_BLACK]: REAL_APPS.get(JUST_BLACK), [OTHER]: appXml(OTHER) } });
+  env.granted.add("https://cdn.example.org/*"); // granted for a record that no longer exists
+  env.granted.add("https://*/*"); // broad grant: covers no CWS origin pattern exactly, needed by nothing
+  await addRepo(JUST_BLACK);
+  await addRepo(OTHER);
+
+  await removeRepo(JB_KEY, false);
+  for (const o of CWS_ORIGINS) assert.ok(env.granted.has(o), `${o} stays: another store record needs it`);
+  assert.ok(!env.granted.has("https://cdn.example.org/*"), "an origin no record needs is given back");
+
+  await removeRepo(`cws:${OTHER}`, false);
+  for (const o of CWS_ORIGINS) assert.ok(!env.granted.has(o), `${o} is given back with the last store record`);
+  assert.ok(!env.granted.has("https://*/*"), "the broad grant is given back when nothing needs it");
+  const required = JSON.parse(readFileSync(new URL("../src/manifest.json", import.meta.url), "utf8")).host_permissions;
+  for (const o of required) assert.ok(env.granted.has(o), `required ${o} is never removed`);
 });

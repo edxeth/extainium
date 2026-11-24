@@ -1527,8 +1527,33 @@ export const removeRepo = operation(async (key, uninstall) => {
       await deleteReleasedKeys();
     }
   });
+  await releaseUnusedOrigins();
   await refreshBadge();
 });
+
+// True when host permission pattern p (e.g. https://*/*, https://*.example.org/*)
+// covers origin pattern o (https://host/*).
+function patternCovers(p, o) {
+  if (p === o) return true;
+  const pm = /^https:\/\/(\*|\*\.[^/]+|[^/*]+)\/\*$/.exec(p);
+  const om = /^https:\/\/([^/*]+)\/\*$/.exec(o);
+  if (!pm || !om) return false;
+  if (pm[1] === "*") return true;
+  if (pm[1].startsWith("*.")) return om[1] === pm[1].slice(2) || om[1].endsWith(pm[1].slice(1));
+  return pm[1] === om[1];
+}
+
+// Gives back the optional host permissions no remaining record needs (after a
+// removal), so Extainium does not keep access it no longer uses. Required hosts
+// (manifest host_permissions) stay; a granted pattern stays while it covers an
+// origin some record needs.
+export async function releaseUnusedOrigins() {
+  const required = new Set(chrome.runtime.getManifest().host_permissions || []);
+  const needed = (await listRepos()).flatMap(neededOrigins);
+  const { origins = [] } = await chrome.permissions.getAll();
+  const unused = origins.filter((p) => !required.has(p) && !needed.some((o) => patternCovers(p, o)));
+  if (unused.length) await chrome.permissions.remove({ origins: unused });
+}
 
 // Repos and keys are read in one locked snapshot (event handlers may delete a
 // released key meanwhile), so a repo is never exported without its key.
