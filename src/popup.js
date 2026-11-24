@@ -32,6 +32,7 @@ function avatar(record, ext) {
 }
 
 function row(v) {
+  const pending = v.pendingInstall && v.pendingInstall.tag === v.latest.tag;
   return h("li", {},
     avatar(v.record, v.ext),
     h("div", { className: "row-text" },
@@ -39,22 +40,36 @@ function row(v) {
       h("span", { className: "versions-line" },
         h("span", { className: "visually-hidden" }, "Installed "), v.ext.version,
         h("span", { "aria-hidden": "true" }, " → "), h("span", { className: "visually-hidden" }, ", latest "),
-        h("span", { className: "to" }, v.latest.tag))));
+        h("span", { className: "to" }, v.latest.tag),
+        pending ? " · waiting for the browser" : null)));
+}
+
+// A release that would install as another extension: confirmed in Extainium.
+function attentionRow(v) {
+  return h("li", {},
+    avatar(v.record, v.ext),
+    h("div", { className: "row-text" },
+      h("strong", {}, v.ext ? v.ext.name : v.key),
+      h("span", { className: "versions-line attention" },
+        `${v.record.identityChange.tag} installs as a new extension. Review in Extainium.`)));
 }
 
 async function render() {
   const view = await trackedView();
   const updates = view.filter((v) => v.state === "update");
-  const state = !view.length ? "empty" : updates.length ? "update" : "current";
+  const attention = view.filter((v) => v.state === "identity-change");
+  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : "current";
   document.body.dataset.state = state;
   $("summary").textContent = state === "empty"
     ? "No tracked extensions"
     : state === "update"
       ? `${plural(updates.length, "update", "updates")} available`
-      : "All up to date";
+      : state === "attention"
+        ? `${plural(attention.length, "extension needs", "extensions need")} attention`
+        : "All up to date";
   $("emptyHint").hidden = state !== "empty";
   $("check").hidden = state === "empty";
-  $("updates").replaceChildren(...updates.map(row));
+  $("updates").replaceChildren(...updates.map(row), ...attention.map(attentionRow));
   const { lastCheck } = await chrome.storage.local.get("lastCheck");
   const tracked = state === "current" ? `${plural(view.length, "extension", "extensions")} tracked · ` : "";
   $("lastCheck").textContent = state === "empty"

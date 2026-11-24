@@ -258,7 +258,7 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .state::before { content: ""; inline-size: 8px; block-size: 8px; border-radius: 50%; background: currentColor; }
 .state.update { background: var(--accent-tint); color: var(--accent); }
 .state.current { background: var(--ok-tint); color: var(--ok); }
-.state.no-asset, .state.ambiguous, .state.unknown { background: var(--warn-tint); color: var(--warn); }
+.state.no-asset, .state.ambiguous, .state.unknown, .state.identity-change { background: var(--warn-tint); color: var(--warn); }
 .state.failed { background: var(--err-tint); color: var(--err); }
 
 .versions { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px; margin: 0; }
@@ -274,6 +274,20 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
   background: var(--accent-tint); border-radius: var(--r-md); padding: 8px 12px; overflow-wrap: anywhere;
 }
 .card .error { background: var(--err-tint); border-radius: var(--r-md); padding: 8px 12px; }
+.card-status.idle { color: var(--fg); background: var(--surface-2); font-weight: 400; }
+
+/* A to-do or warning that needs the user: identity change, asset to choose again, import conflicts. */
+.notice {
+  display: grid; gap: 8px; min-inline-size: 0;
+  background: var(--warn-tint); color: var(--fg); border-radius: var(--r-md); padding: 12px;
+  font-size: var(--fs-sm); overflow-wrap: anywhere;
+}
+.notice .hint { color: var(--fg); }
+.notice .card-actions > button { flex: 0 1 auto; }
+.notice ul, .error-list ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; }
+.error-list { display: grid; gap: 8px; background: var(--err-tint); border-radius: var(--r-md); padding: 12px; }
+.error-list strong { color: var(--fg); }
+.field-hint { margin-block-start: 4px; }
 .card.busy::before {
   content: ""; position: absolute; inset-inline: 0; inset-block-start: 0; block-size: 3px;
   background: var(--accent); transform-origin: left; animation: indeterminate 1.4s linear infinite;
@@ -302,7 +316,8 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: var(--fs-sm); }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.remove { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding-block-start: 12px; border-block-start: 1px solid var(--line); }
+.remove { display: grid; gap: 8px; padding-block-start: 12px; border-block-start: 1px solid var(--line); }
+.remove-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .remove .switch { font-size: var(--fs-sm); }
 
 /* ---- asset buttons (picker and ambiguous card) ---- */
@@ -325,6 +340,8 @@ button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .actions > button { flex: 1 1 120px; }
 .hint.warn { color: var(--fg); background: var(--warn-tint); border-radius: var(--r-md); padding: 12px; }
+.import-result { display: grid; gap: 8px; margin-block-start: 8px; }
+.result-title { font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ---- bottom sheet ---- */
 .sheet {

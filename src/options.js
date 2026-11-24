@@ -1,6 +1,6 @@
 import {
-  addRepo, checkAll, checkRepo, chooseAsset, exportBackup, importBackup, installFile,
-  installRelease, refreshBadge, removeRepo, setPattern, setPrereleases, trackInstalledFile, trackedView,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, exportBackup, importBackup,
+  installFile, installRelease, refreshBadge, removeRepo, setPrereleases, setTemplate, trackInstalledFile, trackedView,
 } from "./lib/manager.js";
 import { getRepo, getSettings, setSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
@@ -92,7 +92,10 @@ const STATE_LABEL = {
   update: "Update available",
   current: "Up to date",
   unknown: "Version unknown",
+  "identity-change": "New extension ID",
 };
+// Set by the storage migration when a 0.1 regex pattern had no template form.
+const isConversionError = (msg) => /could not be converted to a file name template/.test(msg || "");
 const extOf = (name) => (name.match(/\.(crx|zip)$/i) || [])[1];
 
 // Per-card progress and errors: key -> { busy, text, error }.
@@ -150,7 +153,7 @@ async function renderPicker() {
     if (!sheet.open) sheet.showModal();
     return;
   }
-  $("pickerRelease").textContent = `Release ${release.tag} · ${formatDate(release.publishedAt)}. Later releases use the same file name pattern.`;
+  $("pickerRelease").textContent = `Release ${release.tag} · ${formatDate(release.publishedAt)}. Later releases use the same file name template.`;
   const assets = [...release.assets].sort((a, b) => isPackageAsset(b.name) - isPackageAsset(a.name));
   const visible = $("pickerAll").checked ? assets : assets.filter((a) => isPackageAsset(a.name));
   $("pickerAll").parentElement.querySelector("span").textContent = `Show all assets (${assets.length})`;
@@ -203,13 +206,43 @@ function avatar(record, ext) {
     icon ? h("img", { className: "ext", alt: "", width: 24, height: 24, src: icon, onerror: (e) => e.target.remove() }) : null);
 }
 
+// The identity-change notice: the release installs under another extension ID.
+function identityNotice(key, change) {
+  return h("div", { className: "notice", role: "alert" },
+    h("p", {}, h("strong", {}, `${change.tag} installs as a separate extension.`),
+      " Its settings and data will not carry over from the installed one."),
+    h("dl", { className: "facts" },
+      h("dt", {}, "Current ID"), h("dd", {}, change.from),
+      h("dt", {}, "New ID"), h("dd", {}, change.to),
+      h("dt", {}, "Asset"), h("dd", {}, change.asset)),
+    h("p", { className: "hint" }, "To keep the current extension, turn off pre-releases or choose another asset under More."),
+    h("div", { className: "card-actions" },
+      h("button", { onclick: () => cardAct(key, async () => { await confirmIdentityChange(key); }) }, "Use the new ID")));
+}
+
+// Install handed to the browser and not confirmed yet. After the grace period
+// the prompt was most likely dismissed; the entry stays until the lib forgets it.
+function pendingLine(pending) {
+  if (Date.now() - pending.at < PENDING_GRACE_MS) {
+    return h("p", { className: "card-status", role: "status" }, h("span", { className: "spinner", "aria-hidden": "true" }),
+      `Waiting for the browser to confirm ${pending.version}…`);
+  }
+  return h("p", { className: "card-status idle", role: "status" },
+    `The browser has not confirmed ${pending.version}. If you dismissed the prompt, install again.`);
+}
+
 function card(v) {
-  const { key, record, latest, ext, state } = v;
+  const { key, record, latest, ext, state, pendingInstall } = v;
   const status = cardStatus.get(key) || {};
   const title = ext ? ext.name : record.repo;
   const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
-  const canInstall = latest && latest.asset;
-  const failed = !!record.error;
+  const identity = state === "identity-change";
+  const canInstall = latest && latest.asset && !identity;
+  // A migration that could not convert the pattern asks for the asset again: a
+  // to-do on the "No asset" card, not a failed check. Once a template is set it is stale.
+  const converted = isConversionError(record.error);
+  const checkError = converted ? null : record.error;
+  const failed = !!checkError;
 
   const installed = ext
     ? h("dd", {}, ext.version, ext.enabled ? null : h("span", { className: "sub" }, "disabled"))
@@ -220,7 +253,7 @@ function card(v) {
           formatDate(latest.release.publishedAt), latest.release.prerelease ? " · pre-release" : "", " · ",
           h("a", { href: latest.release.htmlUrl, target: "_blank", rel: "noopener" }, "notes")))
     : h("dd", {}, "—", h("span", { className: "sub" },
-        !record.releases ? "No release data yet" : record.pattern ? "No release matches the pattern" : "No asset chosen"));
+        !record.releases ? "No release data yet" : record.template ? "No release matches the template" : "No asset chosen"));
 
   const details = h("details", {
     open: openDetails.has(key),
@@ -234,25 +267,26 @@ function card(v) {
       h("form", {
         onsubmit: (e) => {
           e.preventDefault();
-          // Errors (e.g. an invalid regex) show on this card, next to the field's card.
-          const pattern = e.target.elements.pattern.value.trim();
-          cardAct(key, async () => { await setPattern(key, pattern); });
+          // Errors (e.g. an invalid template) show on this card.
+          const template = e.target.elements.template.value.trim();
+          cardAct(key, async () => { await setTemplate(key, template); });
         },
       },
-        h("label", { className: "group-label", htmlFor: `pattern-${key}` }, "Asset file name pattern (regex)"),
+        h("label", { className: "group-label", htmlFor: `template-${key}` }, "Asset file name template"),
         h("div", { className: "field" },
-          h("input", { type: "text", id: `pattern-${key}`, name: "pattern", value: record.pattern || "", placeholder: "^name-.*\\.crx$", spellcheck: false, autocapitalize: "off", autocomplete: "off" }),
-          h("button", {}, "Save"))),
+          h("input", { type: "text", id: `template-${key}`, name: "template", value: record.template || "", placeholder: "name-{version}.zip", spellcheck: false, autocapitalize: "off", autocomplete: "off", "aria-describedby": `template-hint-${key}` }),
+          h("button", {}, "Save")),
+        h("p", { className: "hint field-hint", id: `template-hint-${key}` }, "Use {version} for the version and * for any text.")),
       h("label", { className: "switch" },
         h("input", { type: "checkbox", checked: record.includePrereleases, onchange: (e) => act(null, () => setPrereleases(key, e.target.checked)) }),
         h("span", {}, "Include pre-releases")),
-      olderReleases(key, record),
+      identity ? null : olderReleases(key, record),
       h("dl", { className: "facts" },
         h("dt", {}, "Extension ID"), h("dd", {}, record.extensionId || "unknown"),
-        h("dt", {}, "Signing"), h("dd", {}, record.keyPkcs8 ? "own key (zip assets)" : "author's key (crx assets)"),
+        h("dt", {}, "Signing"), h("dd", {}, v.hasKey ? "own key (zip assets)" : "author's key (crx assets)"),
         latest && latest.asset ? [h("dt", {}, "Asset"), h("dd", {}, latest.asset.name)] : null,
         h("dt", {}, "Checked"), h("dd", {}, record.checkedAt ? new Date(record.checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never")),
-      removeControls(key, record)));
+      removeControls(key, record, v.hasKey)));
 
   return h("article", { className: `card state-${state}${status.busy ? " busy" : ""}`, "data-key": key, "aria-busy": String(!!status.busy) },
     h("div", { className: "card-head" },
@@ -270,19 +304,20 @@ function card(v) {
             h("span", { className: "name" }, extOf(a.name) ? h("span", { className: "kind" }, extOf(a.name)) : null, a.name),
             h("span", { className: "muted" }, formatSize(a.size)))))
       : null,
-    record.error ? h("p", { className: "error check-error", role: "alert" }, record.error) : null,
+    converted && !record.template ? h("p", { className: "notice" }, record.error) : null,
+    identity ? identityNotice(key, record.identityChange) : null,
+    checkError ? h("p", { className: "error check-error", role: "alert" }, checkError) : null,
     status.text ? h("p", { className: "card-status", role: "status" }, status.busy ? h("span", { className: "spinner", "aria-hidden": "true" }) : null, status.text) : null,
+    !status.busy && !status.text && pendingInstall ? pendingLine(pendingInstall) : null,
     status.error ? h("p", { className: "error card-error", role: "alert" }, status.error) : null,
-    !record.pattern || canInstall
+    !record.template || canInstall
       ? h("div", { className: "card-actions" },
-          !record.pattern ? h("button", { className: "primary", onclick: () => openPicker(key) }, "Choose asset") : null,
+          !record.template ? h("button", { className: "primary", onclick: () => openPicker(key) }, "Choose asset") : null,
           canInstall
             ? h("button", {
                 className: state === "update" || state === "not-installed" ? "primary" : "",
-                onclick: () => cardAct(key, async (progress) => {
-                  const res = await installRelease(key, undefined, progress);
-                  return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
-                }),
+                // The card then shows the pending install until the browser confirms it.
+                onclick: () => cardAct(key, (progress) => installRelease(key, undefined, progress).then(() => null)),
               }, installLabel)
             : null)
       : null,
@@ -290,9 +325,9 @@ function card(v) {
 }
 
 function olderReleases(key, record) {
-  if (!record.pattern || !record.releases) return null;
+  if (!record.template || !record.releases) return null;
   const options = record.releases
-    .filter((r) => matchAssets(r, record.pattern).length === 1)
+    .filter((r) => matchAssets(r, record.template).length === 1)
     .map((r) => h("option", { value: r.tag }, `${r.tag}${r.prerelease ? " (pre)" : ""} · ${formatDate(r.publishedAt)}`));
   if (!options.length) return null;
   const select = h("select", { id: `release-${key}` }, options);
@@ -300,27 +335,40 @@ function olderReleases(key, record) {
     h("label", { className: "group-label", htmlFor: `release-${key}` }, "Install a specific release"),
     h("div", { className: "field" }, select,
       h("button", {
-        onclick: () => cardAct(key, async (progress) => {
-          const res = await installRelease(key, select.value, progress);
-          return `Confirm the browser prompt to add ${res.name} ${res.version}.`;
-        }),
+        onclick: () => cardAct(key, (progress) => installRelease(key, select.value, progress).then(() => null)),
       }, "Install")));
 }
 
-function removeControls(key, record) {
-  const uninstall = h("input", { type: "checkbox" });
+// What Remove does, for the current state of the uninstall switch.
+function removeText(uninstall, hasKey) {
+  if (uninstall) {
+    return hasKey
+      ? "Remove uninstalls the extension and deletes its signing key. Installing it again later gives it a new ID and none of its data."
+      : "Remove uninstalls the extension and stops tracking the repo.";
+  }
+  return hasKey
+    ? "Remove stops tracking. The extension stays installed, and its signing key is kept: adding the repo again installs updates under the same ID, and exports still include the key."
+    : "Remove stops tracking. The extension stays installed.";
+}
+
+function removeControls(key, record, hasKey) {
+  const id = `remove-hint-${key}`;
+  const hint = h("p", { className: "hint", id }, removeText(false, hasKey));
+  const uninstall = h("input", { type: "checkbox", "aria-describedby": id, onchange: () => (hint.textContent = removeText(uninstall.checked, hasKey)) });
   return h("div", { className: "remove" },
-    record.extensionId ? h("label", { className: "switch" }, uninstall, h("span", {}, "Also uninstall the extension")) : h("span"),
-    h("button", {
-      className: "danger",
-      onclick: (e) => act(e.currentTarget, async () => {
-        // With uninstall, the browser's own dialog confirms; a confirm() first
-        // would use up the user gesture chrome.management.uninstall needs.
-        if (!uninstall.checked && !confirm(`Stop tracking ${key}?`)) return;
-        await removeRepo(key, uninstall.checked);
-        return `Removed ${key}.`;
-      }),
-    }, "Remove"));
+    h("div", { className: "remove-row" },
+      record.extensionId ? h("label", { className: "switch" }, uninstall, h("span", {}, "Also uninstall the extension")) : h("span"),
+      h("button", {
+        className: "danger", "aria-describedby": id,
+        onclick: (e) => act(e.currentTarget, async () => {
+          // With uninstall, the browser's own dialog confirms; a confirm() first
+          // would use up the user gesture chrome.management.uninstall needs.
+          if (!uninstall.checked && !confirm(`Stop tracking ${key}?\n\n${removeText(false, hasKey)}`)) return;
+          await removeRepo(key, uninstall.checked);
+          return `Removed ${key}.`;
+        }),
+      }, "Remove")),
+    hint);
 }
 
 let rendering = Promise.resolve();
@@ -337,10 +385,14 @@ async function renderNow() {
   const updates = view.filter((v) => v.state === "update").length;
   $("updateCount").hidden = !updates;
   $("updateCount").textContent = plural(updates, "update", "updates");
+  // Keep the user's choice across storage-driven re-renders.
+  const chosenKey = $("fileKey").value;
+  const keyed = view.filter((v) => v.hasKey);
   $("fileKey").replaceChildren(
     h("option", { value: "" }, "a new key"),
-    ...view.filter((v) => v.record.keyPkcs8).map((v) => h("option", { value: v.key }, v.key))
+    ...keyed.map((v) => h("option", { value: v.key }, v.key))
   );
+  if (keyed.some((v) => v.key === chosenKey)) $("fileKey").value = chosenKey;
   const { lastCheck, rateLimit } = await chrome.storage.local.get(["lastCheck", "rateLimit"]);
   $("checkInfo").textContent = lastCheck
     ? `Last checked ${new Date(lastCheck.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
@@ -424,10 +476,30 @@ $("importInput").addEventListener("change", (e) =>
     const file = e.target.files[0];
     e.target.value = "";
     if (!file) return;
-    const { count, errors } = await importBackup(await file.text());
-    return `Imported ${plural(count, "repo", "repos")}.${errors.length ? `\nCheck errors:\n${errors.join("\n")}` : ""}`;
+    $("importResult").hidden = true;
+    const res = await importBackup(await file.text());
+    showImportResult(res); // shown under the Import button, so no toast
   })
 );
+
+// Conflicts, warnings and check errors of the last import stay under Backup
+// until the next import; the toast only says how many repos came in.
+function showImportResult({ count, errors, conflicts, warnings }) {
+  const box = (title, items, className = "notice") =>
+    h("div", { className }, h("strong", {}, title), h("ul", {}, items.map((t) => h("li", {}, t))));
+  const parts = [
+    conflicts.length
+      ? box(`Kept the current signing key for ${plural(conflicts.length, "repo", "repos")}`,
+          conflicts.map((c) => `${c.key}: kept ID ${c.keptId}. The backup had another key (ID ${c.backupId}), which was not imported.`))
+      : null,
+    warnings.length ? box(plural(warnings.length, "warning", "warnings"), warnings) : null,
+    errors.length ? box(`Check after import: ${plural(errors.length, "error", "errors")}`, errors, "error error-list") : null,
+  ].filter(Boolean);
+  $("importResult").replaceChildren(
+    h("p", { className: "result-title" }, `Imported ${plural(count, "repo", "repos")}`, parts.length ? null : h("span", { className: "muted" }, " · no key conflicts")),
+    ...parts);
+  $("importResult").hidden = false;
+}
 
 // Re-render on background changes, but not while the user types in the list.
 chrome.storage.onChanged.addListener((changes, area) => {
