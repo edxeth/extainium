@@ -9,7 +9,13 @@ cd "$(dirname "$0")/.."
 
 version="$(node -p 'JSON.parse(require("fs").readFileSync("src/manifest.json", "utf8")).version')"
 tag="v$version"
-repo="${EXTAINIUM_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+# owner/repo of the origin remote (gh's default repo may be another remote, e.g. upstream).
+origin_url="$(git remote get-url origin)"
+repo="${EXTAINIUM_REPO:-$(printf '%s\n' "$origin_url" | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')}"
+case "$repo" in
+  */*) ;;
+  *) echo "release: cannot read owner/repo from origin $origin_url; set EXTAINIUM_REPO" >&2; exit 1 ;;
+esac
 
 if [ -n "$(git status --porcelain)" ]; then
   echo "release $tag: the working tree has uncommitted changes" >&2
