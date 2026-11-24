@@ -274,8 +274,9 @@ const pendingEntry = (extra) => ({
   downloadId: 1, downloadDone: false, at: 1, confirmedAt: null, fileGone: false, removeError: null, ...extra,
 });
 
-// F6: the sweep never cancels a download still in progress; it deletes the copy once it is complete.
-test("the sweep leaves a download in progress alone and deletes it once complete", async () => {
+// F6: the sweep never cancels a download still in progress; it deletes the copy once it is complete
+// and (round 3 F1, owner decision) the grace period from its completion, when the prompt appeared, has passed.
+test("the sweep leaves a download in progress alone and deletes it the grace period after it completed", async () => {
   const env = fakeChrome();
   Object.assign(env.store, { schema: 2, "install:t": pendingEntry() });
   env.files.set(1, { filename: "large.crx", bytes: new Uint8Array(1), state: "in_progress", exists: true });
@@ -285,6 +286,8 @@ test("the sweep leaves a download in progress alone and deletes it once complete
   assert.ok(env.store["install:t"], "the entry is kept");
   env.files.get(1).state = "complete";
   await sweepDownloads(manager.PENDING_GRACE_MS + 2);
+  assert.deepEqual(env.removed, [], "the prompt of the completed download may still show");
+  await sweepDownloads(2 * manager.PENDING_GRACE_MS + 2);
   assert.deepEqual(env.removed, [1]);
   assert.deepEqual(env.erased, [1]);
 });
@@ -402,3 +405,95 @@ test("the CRX is handed to the browser under a file name without any dot", async
   assert.match(filename, /^[A-Za-z0-9_-]+$/, filename);
   assert.match(filename, /^Example-1_0-\d+$/, "names the extension and version");
 });
+
+
+// ---- Round 3 F2: a replacement supersedes only once its prompt is up ----
+// (owner decision) An earlier pending entry is superseded only when the
+// replacement's hand-off download completed; before that the earlier entry
+// stays confirmable with its key hold, and an install event in between is the
+// earlier one's. A replacement that fails to start or is interrupted supersedes nothing.
+
+// Releases v1 and v2 with the same zip (manifest 1.0), tracked with a stored signing key.
+async function zipBuildsSetup() {
+  const { privateKey } = nodeCrypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const pkcs8 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
+  const env = fakeChrome();
+  fakeGithub(["v2", "v1"].map((tag) => ({ tag, assets: [{ name: "example.zip", bytes: zip }] })));
+  await importBackup(v1Backup([v1Record({ pattern: "^example\\.zip$", keyPkcs8: pkcs8 })]));
+  return { env, pkcs8 };
+}
+const entryOf = (env, tag) => Object.values(env.store).find((v) => v && v.token && v.installed && v.installed.tag === tag);
+
+// Starts installRelease(K, tag) with its download left in progress; resolves once the hand-off waits for it.
+async function startInFlight(env, tag) {
+  env.newDownloadState = "in_progress";
+  const { promise: started, resolve } = Promise.withResolvers();
+  env.onDownloadStarted = async (id) => { env.onDownloadStarted = null; resolve(id); };
+  const installing = installRelease(K, tag);
+  const id = await started;
+  while (!env.changedListeners.size) await new Promise((r) => setTimeout(r, 1));
+  env.newDownloadState = "complete";
+  return { id, installing };
+}
+const completeDownload = (env, id) => {
+  env.files.get(id).state = "complete";
+  env.emitChanged({ id, state: { previous: "in_progress", current: "complete" } });
+};
+
+// F2 repro: the second hand-off cannot start while the first is in flight.
+test("a replacement whose download fails to start supersedes nothing: the in-flight first install keeps its key and stays confirmable", async () => {
+  const { env } = await zipBuildsSetup();
+  const first = await startInFlight(env, "v1");
+  const download = chrome.downloads.download;
+  chrome.downloads.download = async () => { throw new Error("start rejected"); };
+  await assert.rejects(installRelease(K, "v2"), /start rejected/);
+  chrome.downloads.download = download;
+  const e = entryOf(env, "v1");
+  assert.deepEqual({ version: e.version, signedWith: e.signedWith, supersededBy: e.supersededBy }, { version: "1.0", signedWith: K, supersededBy: null });
+  completeDownload(env, first.id);
+  const { extensionId } = await first.installing;
+  await browserInstalls(env, extensionId, "1.0");
+  assert.equal((await trackedView())[0].record.installed.tag, "v1");
+});
+
+test("a removal with uninstall after a replacement failed to start keeps the key of the in-flight first install", async () => {
+  const { env, pkcs8 } = await zipBuildsSetup();
+  const first = await startInFlight(env, "v1");
+  const download = chrome.downloads.download;
+  chrome.downloads.download = async () => { throw new Error("start rejected"); };
+  await assert.rejects(installRelease(K, "v2"), /start rejected/);
+  chrome.downloads.download = download;
+  await manager.removeRepo(K, true);
+  assert.equal(env.store["key:" + K], pkcs8, "held by the first install");
+  completeDownload(env, first.id);
+  await first.installing;
+});
+
+// F2 repro: the event of the first prompt arrives while the second download is only starting.
+test("an install event that arrives while the replacement is still downloading commits the earlier build", async () => {
+  const { env } = await zipBuildsSetup();
+  const first = await installRelease(K, "v1");
+  const second = await startInFlight(env, "v2");
+  assert.equal(entryOf(env, "v1").version, "1.0", "the first is still confirmable while the second downloads");
+  await browserInstalls(env, first.extensionId, "1.0");
+  assert.equal((await trackedView())[0].record.installed.tag, "v1");
+  completeDownload(env, second.id);
+  await second.installing;
+  assert.equal((await trackedView())[0].pendingInstall.tag, "v2", "the second prompt is pending now");
+  await browserInstalls(env, first.extensionId, "1.0");
+  assert.equal((await trackedView())[0].record.installed.tag, "v2");
+});
+
+test("an interrupted replacement supersedes nothing: the earlier prompt's install event still commits it", async () => {
+  const { env } = await zipBuildsSetup();
+  const first = await installRelease(K, "v1");
+  const second = await startInFlight(env, "v2");
+  env.files.get(second.id).state = "interrupted";
+  env.emitChanged({ id: second.id, state: { previous: "in_progress", current: "interrupted" }, error: { current: "NETWORK_FAILED" } });
+  await assert.rejects(second.installing, /interrupted/);
+  assert.equal(entryOf(env, "v1").version, "1.0");
+  assert.equal((await trackedView())[0].pendingInstall.tag, "v1");
+  await browserInstalls(env, first.extensionId, "1.0");
+  assert.equal((await trackedView())[0].record.installed.tag, "v1");
+});
+

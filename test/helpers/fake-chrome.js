@@ -1,6 +1,8 @@
 // In-memory fakes of the chrome.* APIs and of GitHub that the manager uses.
 // Storage values are cloned on every read and write, as chrome.storage does.
 
+import { createHash } from "node:crypto";
+
 const clone = (v) => structuredClone(v);
 const nativeFetch = globalThis.fetch;
 
@@ -129,6 +131,7 @@ ${entries.join("\n")}
 }
 
 // releases: [{ tag, prerelease?, publishedAt?, updatedAt?, assets: [{ name, bytes, digest? }] }]
+// (updatedAt defaults to publishedAt, as in atomFeed)
 // Serves the releases API (pageSize releases per page, with Link rel="next"),
 // the asset downloads, including Range requests, and, when feed is set (gh.feed:
 // true for atomFeed(gh.releases), or the feed text), releases.atom; else the feed is 404.
@@ -141,6 +144,8 @@ export function fakeGithub(releases, { pageSize = 30, owner = "o", repo = "r", f
     name: r.tag,
     prerelease: !!r.prerelease,
     published_at: r.publishedAt || "2026-01-01T00:00:00Z",
+    // GitHub's feed shows a release's updated_at as the entry's <updated> (as atomFeed does).
+    updated_at: r.updatedAt || r.publishedAt || "2026-01-01T00:00:00Z",
     html_url: `https://github.com/${owner}/${repo}/releases/tag/${r.tag}`,
     assets: r.assets.map((a) => ({ name: a.name, browser_download_url: assetUrl(r.tag, a.name), size: a.bytes ? a.bytes.length : 0, digest: a.digest || null })),
   });
@@ -158,7 +163,8 @@ export function fakeGithub(releases, { pageSize = 30, owner = "o", repo = "r", f
       const page = Number(u.searchParams.get("page") || 1);
       const all = gh.releases.map(api);
       const items = all.slice((page - 1) * pageSize, page * pageSize);
-      const etag = `"p${page}-${JSON.stringify(items).length}"`;
+      // A content hash, as GitHub's: any change of the page's data changes it.
+      const etag = `"p${page}-${createHash("sha256").update(JSON.stringify(items)).digest("hex").slice(0, 16)}"`;
       const headers = { etag };
       if (page * pageSize < all.length) {
         headers.link = `<https://api.github.com/repositories/1/releases?per_page=${pageSize}&page=${page + 1}>; rel="next", <https://api.github.com/repositories/1/releases?per_page=${pageSize}&page=9>; rel="last"`;

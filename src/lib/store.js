@@ -37,9 +37,10 @@ export function withStateLock(fn) {
 // Record: { owner, repo, template, includePrereleases, extensionId,
 //   installed: { tag, digest, version } | null  (confirmed by management.onInstalled),
 //   identityChange: { from, to, tag, asset } | null  (relink waiting for confirmation),
-//   releases, pages, feed, checkedCriteria, checkedAt, error, addedAt }
-// releases and pages are the release cache of the last full check (API);
-// feed (the releases.atom entries it saw) and checkedCriteria ({ template,
+//   releases, pages, feed, checkedCriteria, fullCheckAt, checkedAt, error, addedAt }
+// releases and pages are the release cache of the last full check (API, at
+// fullCheckAt); feed ({ newest }: the latest <updated>, in ms, of the
+// releases.atom entries it saw, or null) and checkedCriteria ({ template,
 // includePrereleases } it used) decide whether the next check needs the API.
 export function newRecord(owner, repo) {
   return {
@@ -54,6 +55,7 @@ export function newRecord(owner, repo) {
     pages: null,
     feed: null,
     checkedCriteria: null,
+    fullCheckAt: null,
     checkedAt: null,
     error: null,
     addedAt: Date.now(),

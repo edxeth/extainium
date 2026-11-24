@@ -576,7 +576,8 @@ function renderKeyChoice(view, fileKeys) {
     f.name ? `${f.name} ${f.version} · ${f.extensionId}` : `Not installed · ${f.extensionId}`));
   select.replaceChildren(
     h("option", { value: "" }, "a new key"),
-    ...(repoKeys.length ? [files.length ? h("optgroup", { label: "Tracked repos" }, repoKeys) : repoKeys] : []),
+    // Grouped only next to file keys; alone, the repo options are listed directly.
+    ...(files.length && repoKeys.length ? [h("optgroup", { label: "Tracked repos" }, repoKeys)] : repoKeys),
     ...(files.length ? [h("optgroup", { label: "Installed from a file" }, files)] : [])
   );
   select.value = [...select.options].some((o) => o.value === chosen) ? chosen : "";

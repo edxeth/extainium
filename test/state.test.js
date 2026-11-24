@@ -497,3 +497,203 @@ test("a file key that the backup also holds as a repo key is imported only as th
   assert.equal(env.store["key:" + K], key);
   assert.equal(env.store["filekey:" + id], undefined);
 });
+
+
+// ---- Round 3 F1: a key hold lasts while the install is in flight ----
+// (owner decision) The hold starts its PENDING_GRACE_MS prompt clock only when
+// the hand-off download completes; the key is exported while held.
+
+test("a removal with uninstall keeps the key past the grace period while the hand-off download is in progress, then for the grace period after it completes", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  env.newDownloadState = "in_progress";
+  const { promise: started, resolve } = Promise.withResolvers();
+  env.onDownloadStarted = async () => resolve();
+  const installing = installRelease(K);
+  await started;
+  while (!env.changedListeners.size) await new Promise((r) => setTimeout(r, 1));
+  await removeRepo(K, true);
+  await sweepDownloads(Date.now() + 10 * PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], key, "held while the download is in progress");
+  assert.equal(JSON.parse(await exportBackup()).keys[K], key, "exported while held");
+  assert.deepEqual(env.cancelled, [], "the download is not cancelled");
+  env.files.get(1).state = "complete";
+  env.emitChanged({ id: 1, state: { previous: "in_progress", current: "complete" } });
+  await installing;
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS - 5000);
+  assert.equal(env.store["key:" + K], key, "held within the grace period after the download completed");
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined, "deleted once the prompt expired");
+  assert.deepEqual(marks(env), []);
+});
+
+test("a removal with uninstall keeps the key past the grace period while the hand-off waits for its download ID", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  const { promise: started, resolve } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  env.onDownloadStarted = async () => { resolve(); await gate; };
+  const installing = installRelease(K);
+  await started;
+  await removeRepo(K, true);
+  await sweepDownloads(Date.now() + 10 * PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], key, "held while the download ID is not known");
+  release();
+  await installing;
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined);
+});
+
+// A hand-off whose page closed during the download never learns that it
+// completed; the sweep reads the download's end from the browser.
+test("a sweep finds the end of a download whose hand-off page went away and starts the prompt clock then", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  Object.assign(env.store, { "install:t": {
+    token: "t", repoKey: K, extensionId: idOfPkcs8(key), version: "1.0", installed: { tag: "v1", digest: null, version: "1.0" },
+    crxHash: "x", signedWith: K, supersededBy: null, downloadId: 7, downloadDone: false, at: 1, confirmedAt: null, fileGone: false, removeError: null,
+  } });
+  env.files.set(7, { filename: "x", bytes: new Uint8Array(1), state: "in_progress", exists: true });
+  await removeRepo(K, true);
+  const t0 = Date.now();
+  await sweepDownloads(t0);
+  assert.equal(env.store["key:" + K], key, "in progress: held");
+  env.files.get(7).state = "complete";
+  await sweepDownloads(t0 + 1000);
+  assert.equal(env.store["key:" + K], key, "completed just now: held");
+  assert.deepEqual(env.removed, [], "the copy is kept while the prompt may show");
+  await sweepDownloads(t0 + 1000 + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined);
+  assert.deepEqual(env.removed, [7]);
+});
+
+// ---- Round 3 F3/F4: a file key lives in one place ----
+
+// F3 repro: tracking moved the file key to the repo before its first check;
+// when that check fails, the repo goes and the key must be a file key again.
+test("tracking a file install whose first check fails keeps the file key selectable and stores no repo key", async () => {
+  const env = fakeChrome();
+  fakeGithub([]);
+  const f = await installFile(zip, "local.zip", null);
+  const fetch0 = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).startsWith("https://api.github.com/") ? new Response("no such repo", { status: 404 }) : fetch0(url, init));
+  await assert.rejects(trackInstalledFile(K, { ...f, keyPkcs8: null }), /HTTP 404/);
+  assert.equal(env.store["repo:" + K], undefined, "not tracked");
+  assert.equal(env.store["filekey:" + f.extensionId], f.keyPkcs8, "the file key is back");
+  assert.equal(env.store["key:" + K], undefined, "and not also a repo key");
+  assert.deepEqual((await fileKeysView()).map((v) => v.value), ["file:" + f.extensionId]);
+  const entry = env.store["install:" + f.token];
+  assert.deepEqual({ repoKey: entry.repoKey, version: entry.version, signedWith: entry.signedWith }, { repoKey: null, version: "1.0", signedWith: null }, "the pending file install is as before");
+});
+
+// F4 repro: an install with a selected file key read the key before tracking
+// moved it to a repo, and its hand-off wrote it back as a file key.
+test("an install with a file key that tracking moved meanwhile is refused and does not bring the file key back", async () => {
+  const env = fakeChrome();
+  fakeGithub([zipRelease("v1")]);
+  const f = await installedFromFile(env);
+  const { promise: started, resolve } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  const get = chrome.storage.local.get;
+  let hold = true;
+  chrome.storage.local.get = async (k) => {
+    const value = await get(k);
+    if (hold && k === "filekey:" + f.extensionId) { hold = false; resolve(); await gate; }
+    return value;
+  };
+  const second = installFile(zip, "local.zip", "file:" + f.extensionId);
+  await started;
+  await trackInstalledFile(K, { ...f, keyPkcs8: null });
+  release();
+  await assert.rejects(second, new RegExp(`install local\\.zip: the file key of extension ${f.extensionId} is no longer stored`));
+  assert.equal(env.store["filekey:" + f.extensionId], undefined, "not written back");
+  assert.equal(env.store["key:" + K], f.keyPkcs8);
+  assert.equal(env.handedOff.length, 1, "only the first install was handed off");
+  await removeRepo(K, true);
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined);
+  assert.equal(env.store["filekey:" + f.extensionId], undefined, "the deleted key survives nowhere");
+});
+
+// Model (F3/F4): tracking a file install (whose first check fails or succeeds),
+// installs signed with the selected file key, and a removal with uninstall run
+// concurrently; the scheduler orders all storage and network calls. The file's
+// key is never both a file key and a repo key; while the repo is tracked it is
+// the repo key; without a successful removal and with the repo untracked it is
+// still a selectable file key; after a removal it survives nowhere.
+test("property: interleaved track/file-key install/remove keep the file key in exactly one place", async () => {
+  const op = fc.constantFrom("track", "install", "remove");
+  await fc.assert(
+    fc.asyncProperty(fc.scheduler(), fc.array(op, { minLength: 2, maxLength: 4 }), fc.boolean(), async (s, ops, apiFails) => {
+      const env = fakeChrome();
+      fakeGithub([zipRelease("v1")]);
+      const f = await installedFromFile(env);
+      const k = f.keyPkcs8;
+      const local = chrome.storage.local;
+      chrome.storage.local = {
+        get: s.scheduleFunction(local.get),
+        set: s.scheduleFunction(local.set),
+        remove: s.scheduleFunction(local.remove),
+      };
+      const fetch0 = globalThis.fetch;
+      const scheduledFetch = s.scheduleFunction(async (url, init) =>
+        (apiFails && String(url).startsWith("https://api.github.com/") ? new Response("no such repo", { status: 404 }) : fetch0(url, init)));
+      globalThis.fetch = async (...args) => {
+        await new Promise((r) => setTimeout(r, 5));
+        return scheduledFetch(...args);
+      };
+      let removed = false;
+      const run = {
+        track: () => trackInstalledFile(K, { ...f, keyPkcs8: null }).catch((e) => {
+          if (!/already tracked|HTTP 404|not tracked/.test(e.message)) throw e;
+        }),
+        install: () => installFile(zip, "local.zip", "file:" + f.extensionId).catch((e) => {
+          if (!/is no longer stored|no file key is stored/.test(e.message)) throw e;
+        }),
+        remove: () => removeRepo(K, true).then(() => { removed = true; }, (e) => {
+          if (!/not tracked/.test(e.message)) throw e;
+        }),
+      };
+      const results = await s.waitFor(Promise.allSettled(ops.map((o) => run[o]())));
+      chrome.storage.local = local;
+      globalThis.fetch = fetch0;
+      for (const r of results) if (r.status === "rejected") throw r.reason;
+      const places = () => ({ file: env.store["filekey:" + f.extensionId] === k, repo: env.store["key:" + K] === k });
+      assert.ok(!(places().file && places().repo), "never both a file key and a repo key");
+      if (env.store["repo:" + K]) assert.ok(places().repo, "a tracked repo holds the moved key");
+      else if (!removed) assert.ok(places().file, "untracked and not removed: still a selectable file key");
+      for (const crx of env.handedOff) assert.equal(await extensionIdFromCrx(crx), f.extensionId);
+      await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+      if (removed) assert.deepEqual(places(), { file: false, repo: false }, "removed with uninstall: the key survives nowhere");
+    }),
+    { numRuns: 60 }
+  );
+});
+
+
+
+// F4 + F1: an unconfirmed install signed with the file key keeps holding the
+// key once tracking moved it to a repo, so a removal with uninstall waits for it.
+test("a pending install signed with a file key holds that key after tracking moved it to a repo", async () => {
+  const env = fakeChrome();
+  fakeGithub([zipRelease("v1")]);
+  const f = await installedFromFile(env);
+  await installFile(zip, "local.zip", "file:" + f.extensionId);
+  await trackInstalledFile(K, { ...f, keyPkcs8: null });
+  await removeRepo(K, true);
+  assert.equal(env.store["key:" + K], f.keyPkcs8, "held by the pending install");
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined);
+});
+
+// F4: the page's copy of a file key never becomes a second repo's key.
+test("tracking with a file's key that already is another repo's signing key is refused", async () => {
+  const env = fakeChrome();
+  fakeGithub([zipRelease("v1")]);
+  const f = await installedFromFile(env);
+  await trackInstalledFile(K, { ...f, keyPkcs8: null });
+  await assert.rejects(trackInstalledFile("o/s", f), new RegExp(`track o/s: the file's key \\(extension ${f.extensionId}\\) is already the signing key of o/r`));
+  assert.equal(env.store["key:o/s"], undefined);
+  assert.equal(env.store["repo:o/s"], undefined);
+});
+

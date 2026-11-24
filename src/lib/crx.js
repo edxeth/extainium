@@ -99,15 +99,22 @@ export function parseCrx(bytes) {
   if (zipOffset > bytes.length) {
     throw new Error(`parse CRX: header length ${headerLength} exceeds ${bytes.length} bytes`);
   }
-  // signedHeaderData: the SignedData bytes as stored, which the signatures cover.
+  // signedHeaderData: the SignedData bytes as stored, which the signatures
+  // cover; crxId is read from exactly these bytes. A repeated field would
+  // leave the declared ID and the signed bytes ambiguous, so it is refused.
   const header = { rsa: [], ecdsa: [], crxId: null, signedHeaderData: null, zipOffset };
-  for (const f of parseFields(bytes.subarray(12, zipOffset))) {
+  const fields = parseFields(bytes.subarray(12, zipOffset));
+  const signed = fields.filter((f) => f.field === 10000);
+  if (signed.length > 1) throw new Error(`parse CRX: signed_header_data appears ${signed.length} times, expected once`);
+  for (const f of fields) {
     if (f.field === 2) header.rsa.push(parseProof(f.data));
     else if (f.field === 3) header.ecdsa.push(parseProof(f.data));
-    else if (f.field === 10000) {
-      header.signedHeaderData = f.data;
-      for (const s of parseFields(f.data)) if (s.field === 1) header.crxId = s.data;
-    }
+  }
+  if (signed.length) {
+    header.signedHeaderData = signed[0].data;
+    const ids = parseFields(signed[0].data).filter((s) => s.field === 1);
+    if (ids.length > 1) throw new Error(`parse CRX: signed_header_data holds crx_id ${ids.length} times, expected once`);
+    if (ids.length) header.crxId = ids[0].data;
   }
   return header;
 }
@@ -162,17 +169,23 @@ export async function extensionIdFromCrx(bytes) {
 }
 
 // DER ECDSA-Sig-Value (SEQUENCE { INTEGER r, INTEGER s }), the form CRX3
-// stores, to the fixed-size r || s that WebCrypto verifies. Null if malformed.
+// stores, to the fixed-size r || s that WebCrypto verifies. Null unless the
+// encoding is canonical DER, as BoringSSL's ECDSA_SIG_from_bytes (Chromium's
+// verifier) and OpenSSL require: short-form lengths (a P-256 signature has at
+// most 72 bytes), each INTEGER nonnegative and minimal (a leading zero octet
+// only before an octet with its high bit set), no bytes after the SEQUENCE.
 function ecdsaDerToRaw(der, size = 32) {
-  if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2) return null;
+  if (der.length < 8 || der[0] !== 0x30 || der[1] > 0x7f || der[1] !== der.length - 2) return null;
   const out = new Uint8Array(2 * size);
   let pos = 2;
   for (const at of [0, size]) {
-    if (der[pos] !== 0x02) return null;
+    if (pos + 2 > der.length || der[pos] !== 0x02) return null;
     const len = der[pos + 1];
+    if (len === 0 || len > 0x7f || pos + 2 + len > der.length) return null;
     let int = der.subarray(pos + 2, pos + 2 + len);
-    if (len === 0 || len > 0x7f || int.length !== len) return null;
-    while (int.length > 1 && int[0] === 0) int = int.subarray(1);
+    if (int[0] & 0x80) return null; // negative
+    if (int[0] === 0 && len > 1 && !(int[1] & 0x80)) return null; // non-minimal
+    if (int[0] === 0) int = int.subarray(1);
     if (int.length > size) return null;
     out.set(int, at + size - int.length);
     pos += 2 + len;
@@ -187,7 +200,12 @@ function ecdsaDerToRaw(der, size = 32) {
 // what: the file's name for errors. Returns the extension ID.
 export async function verifyCrx(bytes, what = "CRX") {
   const fail = (msg) => new Error(`verify ${what}: ${msg}`);
-  const header = parseCrx(bytes);
+  let header;
+  try {
+    header = parseCrx(bytes);
+  } catch (e) {
+    throw fail(e.message);
+  }
   if (!header.signedHeaderData || !header.crxId) throw fail("the header has no signed crx_id");
   if (header.crxId.length !== 16) throw fail(`the signed crx_id has ${header.crxId.length} bytes, expected 16`);
   const id = extensionIdFromCrxId(header.crxId);
@@ -205,13 +223,16 @@ export async function verifyCrx(bytes, what = "CRX") {
       throw fail(`the key of ${kind} proof ${keyId} is not an ${kind === "RSA" ? "RSA" : "ECDSA P-256"} public key (${e.message})`);
     }
     const sig = kind === "RSA" ? signature : ecdsaDerToRaw(signature);
-    const ok = !!sig && (await crypto.subtle.verify(kind === "RSA" ? RSA : ECDSA_SIG, key, sig, payload));
+    if (!sig) throw fail(`the ECDSA signature of key ${keyId} is not canonical DER: ${base16(signature.subarray(0, 80))}`);
+    const ok = await crypto.subtle.verify(kind === "RSA" ? RSA : ECDSA_SIG, key, sig, payload);
     if (!ok) throw fail(`the ${kind} signature of key ${keyId} does not verify; the file is damaged or was altered`);
     if (keyId === id) idProof = true;
   }
   if (!idProof) throw fail(`no proof's key derives the declared extension ID ${id}`);
   return id;
 }
+
+const base16 = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 export function zipFromCrx(bytes) {
   return bytes.subarray(parseCrx(bytes).zipOffset);

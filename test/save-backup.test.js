@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as manager from "../src/lib/manager.js";
 import { exportBackup, saveBackup } from "../src/lib/manager.js";
 import { fakeChrome, fakeGithub } from "./helpers/fake-chrome.js";
 
@@ -67,3 +68,69 @@ test("a refused download call is reported with the operation and the file name",
   chrome.downloads.download = async () => { throw new Error("Invalid filename"); };
   await assert.rejects(saveBackup("../b.json"), /save backup \.\.\/b\.json: Invalid filename/);
 });
+
+
+// ---- Round 3 F8: early events are buffered per download in arrival order ----
+
+// F8 repro: "complete" and then another delta (exists) for the same download
+// arrive before download() returns, and search no longer lists it.
+test("a complete event followed by another change before download() resolves still reports the backup saved", async () => {
+  const env = setup();
+  env.onDownloadStarted = async (id) => {
+    env.files.delete(id);
+    env.emitChanged({ id, state: { previous: "in_progress", current: "complete" } });
+    env.emitChanged({ id, exists: { previous: true, current: false } });
+  };
+  assert.deepEqual(await saveBackup("b.json"), { saved: true, id: 1, error: null });
+});
+
+// F8 repro: the erase arrives before download() returns.
+test("a download erased before download() resolves reports the backup as not saved", async () => {
+  const env = setup();
+  env.onDownloadStarted = async (id) => {
+    env.files.delete(id);
+    env.emitErased(id);
+  };
+  assert.deepEqual(await saveBackup("b.json"), { saved: false, id: 1, error: "download #1 was erased before it ended" });
+});
+
+// Arrival order decides: the end that came first is the result.
+test("an early complete event followed by an early erase reports the backup saved", async () => {
+  const env = setup();
+  env.onDownloadStarted = async (id) => {
+    env.files.delete(id);
+    env.emitChanged({ id, state: { current: "complete" } });
+    env.emitErased(id);
+  };
+  assert.deepEqual(await saveBackup("b.json"), { saved: true, id: 1, error: null });
+});
+
+test("early events of other downloads do not decide the result", async () => {
+  const env = setup();
+  env.onDownloadStarted = async (id) => {
+    env.emitChanged({ id: id + 1, state: { current: "interrupted" }, error: { current: "FILE_FAILED" } });
+    env.emitErased(id + 2);
+    setTimeout(() => {
+      env.files.delete(id);
+      env.emitChanged({ id, state: { current: "complete" } });
+    }, 5);
+  };
+  assert.deepEqual(await saveBackup("b.json"), { saved: true, id: 1, error: null });
+});
+
+// (owner decision) Never wait forever: without any end event or search result
+// the save ends after saveTiming.confirmMs as "could not confirm".
+test("a download whose end is never reported ends as not confirmed after the time limit", async (t) => {
+  const env = setup();
+  const saved = { ...manager.saveTiming };
+  manager.saveTiming.confirmMs = 20;
+  t.after(() => Object.assign(manager.saveTiming, saved));
+  env.onDownloadStarted = async (id) => { env.files.delete(id); };
+  const result = await saveBackup("b.json");
+  assert.equal(result.saved, false);
+  assert.equal(result.id, 1);
+  assert.match(result.error, /^download #1: could not confirm that the backup was saved/);
+  assert.equal(env.changedListeners.size, 0, "listeners are removed");
+  assert.equal(env.erasedListeners.size, 0);
+});
+

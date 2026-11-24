@@ -268,6 +268,7 @@ export function simplifyReleases(apiReleases) {
       name: r.name || r.tag_name,
       prerelease: r.prerelease,
       publishedAt: r.published_at,
+      updatedAt: r.updated_at,
       htmlUrl: r.html_url,
       assets: r.assets.map((a) => ({
         name: a.name,

@@ -11,9 +11,12 @@ Install and update browser extensions from GitHub releases, the way
 - See installed vs. latest version, release date and notes; a check runs every 6
   hours (and on demand), and the toolbar badge counts available updates. A check
   first reads the repo's `releases.atom` feed, which costs no GitHub API quota,
-  and calls the API only when the feed changed since the last full check, the
-  release cache is empty, the asset template or pre-release setting changed, or
-  the feed is unavailable.
+  and skips the API only when the feed shows nothing it could have missed: the
+  release selected last time is in the feed with the update time the API
+  reported, and no feed entry is newer than those the last full check saw. A
+  full API check also runs when the release cache is empty, the asset template
+  or pre-release setting changed, the last one is more than 24 hours old, or the
+  feed is unavailable or not a complete Atom document.
 - Install or update with one tap. A `.crx` keeps its author's key and extension ID;
   its CRX3 signatures (RSA and ECDSA P-256) are verified as Chromium does before
   it is handed to the browser, and a damaged or altered file is refused.
@@ -22,15 +25,17 @@ Install and update browser extensions from GitHub releases, the way
 - Install a local `.crx`/`.zip` and optionally track it with a repo. A local `.zip`
   can be signed with a tracked repo's key, with the key of an earlier untracked
   file install, or with a new key. The key of a `.zip` installed without a repo is
-  kept (and exported) until the file is tracked with a repo, which takes it over.
+  kept (and exported) until the file is tracked with a repo, which takes it over;
+  if that repo's first check fails, the key goes back to the file keys.
   A local `.crx` keeps its author's key and never changes which extension a
   tracked repo follows.
 - Export/import the list, including the per-repo signing keys and the keys of
   untracked file installs (backup format 3; files of format 1 and 2 still
   import). Removing a repo keeps its key (it re-attaches if the repo is added
   again); only "remove and uninstall" deletes it, and only once no install
-  signed with it is still waiting at the browser's prompt (at most two minutes
-  after the hand-off). An import never replaces a different stored key.
+  signed with it is still downloading or waiting at the browser's prompt (at
+  most two minutes after its download completed). An import never replaces a
+  different stored key.
 
 ## How it installs
 
@@ -46,8 +51,10 @@ An install counts once the browser reports
 it (`management.onInstalled` with the expected ID and version), not when the
 download finishes. That event names no particular build, but Titanium's prompt
 is modal, so a new install of the same extension version replaces an earlier
-one still waiting: only the newest is confirmed. The CRX copies in Downloads are
-deleted after the install, or two minutes after a declined or failed one, and
+one still waiting once its own download completed (its prompt is up): the
+event confirms the newest prompt. A replacement still downloading, or one that
+fails, replaces nothing. The CRX copies in Downloads are deleted after the
+install, or two minutes after the prompt of a declined or failed one, and
 never while the download is still running. A release or file that would
 install under another extension ID than the installed one waits for your
 confirmation.
@@ -59,7 +66,8 @@ confirmation.
   was in Downloads. Chromium 158's source shows no path that hides such a download
   (the location dialog keeps the same download item; search hides only temporary
   and internal downloads); the cause is open. Extainium reports the export from
-  the download's own events and does not search for it afterwards.
+  the download's own events and does not search for it afterwards. If no end is
+  reported within two minutes, it says it could not confirm the save.
 - The extension-less CRX file name that avoids the "Confirm download / Keep"
   step follows from Chromium's source and still needs a check on the phone.
 

@@ -84,14 +84,14 @@ test("deriveTemplate generalizes dotted numbers when the tag version is not in t
   assert.deepEqual(matchAssets(release("v2.0", ["extension.zip", "extension.zip.sig", "my-extension.zip"]), fixed).map((a) => a.name), ["extension.zip"]);
 });
 
-test("simplifyReleases drops drafts and keeps asset digests", () => {
+test("simplifyReleases drops drafts and keeps asset digests and the updated time", () => {
   const api = [
     { tag_name: "v2", name: "", draft: true, prerelease: false, published_at: "x", html_url: "h2", assets: [] },
-    { tag_name: "v1", name: "One", draft: false, prerelease: true, published_at: "2026-01-01T00:00:00Z", html_url: "h1",
+    { tag_name: "v1", name: "One", draft: false, prerelease: true, published_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", html_url: "h1",
       assets: [{ name: "a.zip", browser_download_url: "u", size: 3, digest: "sha256:ab" }] },
   ];
   assert.deepEqual(simplifyReleases(api), [
-    { tag: "v1", name: "One", prerelease: true, publishedAt: "2026-01-01T00:00:00Z", htmlUrl: "h1", assets: [{ name: "a.zip", url: "u", size: 3, digest: "sha256:ab" }] },
+    { tag: "v1", name: "One", prerelease: true, publishedAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z", htmlUrl: "h1", assets: [{ name: "a.zip", url: "u", size: 3, digest: "sha256:ab" }] },
   ]);
 });
 

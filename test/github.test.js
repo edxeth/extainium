@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import fc from "fast-check";
 import { parseReleaseFeed } from "../src/lib/github.js";
 import { checkAll, checkRepo, importBackup, setPrereleases, setTemplate, trackedView } from "../src/lib/manager.js";
-import { fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
+import { atomFeed, fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 
 const v1Record = (extra = {}) => ({
   owner: "o", repo: "r", pattern: "^ext\\.zip$", includePrereleases: false, extensionId: null, keyPkcs8: null,
@@ -176,7 +177,8 @@ test("a selection criterion changed since the last full check calls the API alth
 
 test("with the real uBlock feed a recheck skips the API until an entry's updated time changes", async () => {
   fakeChrome();
-  const gh = fakeGithub([zipRel("1.77.0")], { owner: "gorhill", repo: "uBlock", feed: ublockFeed });
+  // The API's updated_at of 1.77.0 is the feed entry's <updated> (GitHub reports the same time in both).
+  const gh = fakeGithub([zipRel("1.77.0", { updatedAt: "2026-11-22T18:05:49Z" })], { owner: "gorhill", repo: "uBlock", feed: ublockFeed });
   await importBackup(v1Backup([v1Record({ owner: "gorhill", repo: "uBlock" })]));
   gh.requests.length = 0;
   await checkRepo("gorhill/ublock");
@@ -185,3 +187,185 @@ test("with the real uBlock feed a recheck skips the API until an entry's updated
   await checkRepo("gorhill/ublock");
   assert.equal(apiRequests(gh).length, 1);
 });
+
+
+// ---- Round 3 F5: the feed may stand in for the API only when it covers the selection ----
+
+// F5 repro: ten newer pre-releases push the selected stable release out of the
+// ten-entry feed; a rebuild of its asset must still be seen.
+test("a selected release outside the feed's ten entries is revalidated through the API", async () => {
+  fakeChrome();
+  const pres = Array.from({ length: 10 }, (_, i) => ({ tag: "pre" + i, prerelease: true, publishedAt: "2026-11-0" + (i % 9 + 1) + "T00:00:00Z", assets: [] }));
+  const stableRel = { tag: "v1", publishedAt: "2026-10-01T00:00:00Z", assets: [{ name: "ext.zip", bytes: new Uint8Array([1]), digest: "sha256:" + "a".repeat(64) }] };
+  const gh = fakeGithub([...pres, stableRel], { feed: true });
+  await importBackup(v1Backup([v1Record()]));
+  stableRel.assets[0].digest = "sha256:" + "b".repeat(64);
+  stableRel.updatedAt = "2026-11-24T12:00:00Z";
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+  const [view] = await trackedView();
+  assert.equal(view.latest.asset.digest, "sha256:" + "b".repeat(64));
+});
+
+// F5 (owner decision): a full API check is forced once the last one is older than 24 hours.
+test("a check more than 24 hours after the last full check calls the API although the feed covers the selection", async (t) => {
+  const gh = await feedSetup();
+  const now0 = Date.now;
+  t.after(() => { Date.now = now0; });
+  gh.requests.length = 0;
+  Date.now = () => now0() + 23 * 3600 * 1000;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 0, "within 24 hours the feed decides");
+  Date.now = () => now0() + 24 * 3600 * 1000 + 1000;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+});
+
+// F5: a feed entry newer than any the last full check saw (here a tag without a
+// release, which the feed also lists) calls the API, though the selected release is unchanged.
+test("a feed entry newer than the last full check saw calls the API even when the selected release is unchanged", async () => {
+  const gh = await feedSetup();
+  gh.feed = atomFeed([{ tag: "v2-tag", updatedAt: "2026-11-01T00:00:00Z" }, ...gh.releases]);
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 0, "after that full check the feed decides again");
+});
+
+// ---- Round 3 F6: the feed is parsed fully or rejected ----
+
+const atomDoc = (entries) => `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">${entries}</feed>`;
+
+// F6 repro: entries with attributes were silently skipped.
+test("feed entries with attributes are read", () => {
+  const feed = (n) => atomDoc(`<entry xml:lang="en"><id>release-${n}</id><updated>2026-11-24T00:00:00Z</updated></entry>`);
+  assert.deepEqual(parseReleaseFeed(feed(1)), [{ id: "release-1", updated: "2026-11-24T00:00:00Z" }]);
+  assert.deepEqual(parseReleaseFeed(feed(2)), [{ id: "release-2", updated: "2026-11-24T00:00:00Z" }]);
+});
+
+// XML 1.0: predefined entities, character references and CDATA sections are text.
+test("entity-escaped and CDATA text in a feed entry is decoded", () => {
+  const doc = atomDoc(`<entry><id>a&amp;b&lt;&#99;&#x64;<![CDATA[<e>&amp;]]></id><updated><![CDATA[2026-11-24T00:00:00Z]]></updated></entry>`);
+  assert.deepEqual(parseReleaseFeed(doc), [{ id: "a&b<cd<e>&amp;", updated: "2026-11-24T00:00:00Z" }]);
+});
+
+// F6 repro: a truncated document parsed as an empty feed.
+test("a truncated feed is rejected, naming the unclosed element", () => {
+  assert.throws(() => parseReleaseFeed("<feed xmlns=\"http://www.w3.org/2005/Atom\"><entry><id>x</id>"), /parse releases feed: truncated: <entry> is not closed/);
+});
+
+test("a document whose root is not an Atom feed is rejected", () => {
+  assert.throws(() => parseReleaseFeed("<feed><entry><id>x</id><updated>2026-11-24T00:00:00Z</updated></entry></feed>"), /parse releases feed: not an Atom feed/);
+  assert.throws(() => parseReleaseFeed("<rss xmlns=\"http://www.w3.org/2005/Atom\"></rss>"), /parse releases feed: not an Atom feed/);
+});
+
+test("an entry without an id or with an updated time that is not a date is rejected, naming the entry", () => {
+  assert.throws(() => parseReleaseFeed(atomDoc("<entry><updated>2026-11-24T00:00:00Z</updated></entry>")), /parse releases feed: entry #1 has 0 <id> elements/);
+  assert.throws(() => parseReleaseFeed(atomDoc("<entry><id>x</id><updated>soon</updated></entry>")), /parse releases feed: entry #1: <updated> is not a date: "soon"/);
+});
+
+// F6 + F5: two different feeds that the old parser read as the same empty list.
+test("a new release in a feed whose entries carry attributes leads to an API check", async () => {
+  const withAttrs = (gh) => atomFeed(gh.releases).replaceAll("<entry>", '<entry xml:lang="en">');
+  fakeChrome();
+  const gh = fakeGithub([zipRel("v1")], { feed: "" });
+  gh.feed = withAttrs(gh);
+  await importBackup(v1Backup([v1Record()]));
+  gh.releases.unshift(zipRel("v2", { publishedAt: "2026-11-01T00:00:00Z" }));
+  gh.feed = withAttrs(gh);
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+  assert.equal((await trackedView())[0].latest.tag, "v2");
+});
+
+test("a truncated releases.atom falls back to the API", async () => {
+  const gh = await feedSetup();
+  const full = atomFeed(gh.releases);
+  gh.feed = full.slice(0, full.indexOf("</entry>"));
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+});
+
+// ---- Round 3 F9: property test of the Atom parser against the generator's own entries ----
+
+const XML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+// Text as XML character data: each code point literal (when allowed), as a
+// predefined entity, or as a decimal or hex character reference, by choice.
+function escapeText(s, choices) {
+  let out = "";
+  let i = 0;
+  for (const ch of s) {
+    const c = choices.length ? choices[i++ % choices.length] : 0;
+    const cp = ch.codePointAt(0);
+    if (c === 0 && !XML_ESCAPES[ch]) out += ch;
+    else if (c <= 1) out += XML_ESCAPES[ch] || ch;
+    else if (c === 2) out += `&#${cp};`;
+    else out += `&#x${cp.toString(16)};`;
+  }
+  return out;
+}
+// One element's text: escaped, in a CDATA section (when it holds no "]]>"), or split around a comment.
+function encodeText(s, { mode, choices }) {
+  if (mode === "cdata" && !s.includes("]]>")) return `<![CDATA[${s}]]>`;
+  if (mode === "split" && s.length > 1) {
+    const cut = [...s].length >> 1;
+    const cps = [...s];
+    return escapeText(cps.slice(0, cut).join(""), choices) + "<!-- x -->" + `<![CDATA[${cps.slice(cut).join("").replaceAll("]]>", "]]]]><![CDATA[>")}]]>`;
+  }
+  return escapeText(s, choices);
+}
+const attr = fc.tuple(fc.constantFrom("xml:lang", "data-x", "rel", "type"), fc.string({ maxLength: 8 }), fc.constantFrom('"', "'"), fc.constantFrom("", " "))
+  .map(([n, v, q, sp]) => ` ${n}${sp}=${sp}${q}${escapeText(v, [1])}${q}`);
+const attrs = fc.uniqueArray(attr, { maxLength: 2, selector: (a) => a.trim().split(/\s*=/)[0] }).map((a) => a.join(""));
+const textChars = fc.constantFrom("a", "Z", "0", ":", "/", ".", "-", " ", "<", ">", "&", "'", '"', "]", "é", "€", "😀", ";", "#");
+const encoding = fc.record({ mode: fc.constantFrom("escape", "cdata", "split"), choices: fc.array(fc.integer({ min: 0, max: 3 }), { maxLength: 4 }) });
+const entryGen = fc.record({
+  id: fc.string({ unit: textChars, minLength: 1, maxLength: 24 }).map((s) => s.trim()).filter((s) => s.length > 0),
+  updated: fc.date({ min: new Date("2000-01-01T00:00:00Z"), max: new Date("2100-01-01T00:00:00Z"), noInvalidDate: true }).map((d) => d.toISOString().replace(/\.\d{3}Z$/, "Z")),
+  idEnc: encoding, updatedEnc: encoding,
+  entryAttrs: attrs, idAttrs: attrs,
+  extras: fc.subarray(["link", "title", "content", "thumb", "author"]),
+  idFirst: fc.boolean(),
+});
+function entryXml(e) {
+  const extra = {
+    link: `<link rel="alternate" type="text/html" href="https://github.com/o/r/releases/tag/x&amp;y"/>`,
+    title: `<title>${escapeText(e.id, [1])}</title>`,
+    content: `<content type="html">&lt;p&gt;notes &lt;id&gt;fake&lt;/id&gt;&lt;/p&gt;</content>`,
+    thumb: `<media:thumbnail height="30" width="30" url="https://avatars.example/u/1?s=60&amp;v=4"/>`,
+    author: "<author><name>someone</name></author>",
+  };
+  const id = `<id${e.idAttrs}>${encodeText(e.id, e.idEnc)}</id>`;
+  const updated = `<updated>${encodeText(e.updated, e.updatedEnc)}</updated>`;
+  const parts = e.idFirst ? [id, updated] : [updated, id];
+  return `<entry${e.entryAttrs}>\n  ${[e.extras.includes("link") ? extra.link : "", parts[0], ...e.extras.filter((x) => x !== "link").map((x) => extra[x]), parts[1]].join("\n  ")}\n</entry>`;
+}
+const feedGen = fc.record({ entries: fc.array(entryGen, { maxLength: 6 }), prolog: fc.boolean(), comment: fc.boolean() }).map(({ entries, prolog, comment }) => ({
+  entries,
+  doc: (prolog ? '<?xml version="1.0" encoding="UTF-8"?>\n' : "")
+    + (comment ? "<!-- generated -->\n" : "")
+    + '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">\n'
+    + "<id>tag:github.com,2008:https://github.com/o/r/releases</id>\n<title>Release notes from r</title>\n<updated>2026-01-01T00:00:00Z</updated>\n"
+    + entries.map(entryXml).join("\n")
+    + "\n</feed>\n",
+}));
+
+test("property: a generated Atom feed with attributes, escapes and CDATA parses to exactly its entries", () => {
+  fc.assert(fc.property(feedGen, ({ entries, doc }) => {
+    assert.deepEqual(parseReleaseFeed(doc), entries.map((e) => ({ id: e.id, updated: e.updated })));
+  }), { numRuns: 300 });
+});
+
+test("property: every truncation of a generated Atom feed before its closing </feed> is rejected", () => {
+  fc.assert(fc.property(feedGen, fc.double({ min: 0, max: 1, noNaN: true, maxExcluded: true }), ({ doc }, at) => {
+    const end = doc.lastIndexOf("</feed>") + "</feed>".length;
+    const cut = Math.floor(at * end);
+    assert.throws(() => parseReleaseFeed(doc.slice(0, cut)), /^Error: parse releases feed: /);
+  }), { numRuns: 300 });
+});
+
