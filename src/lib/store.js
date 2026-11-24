@@ -6,10 +6,8 @@
 //                      refused (manager.js environment)
 //   "installWorkedAt"  time of the last confirmed install; an older refusal
 //                      candidate cannot set installBlocked (manager.js judgeRefusal)
-//   "reenable:<extension ID>"  time Apply now turned the extension off; removed
-//                      once it is on again (manager.js applyDelayed, restoreDisabled)
-//   "selfTracked"      time Extainium tracked its own update URL on desktop
-//                      (manager.js trackSelf); it is not tracked again after that
+//   "selfOptOut"       time the user removed Extainium's own record; trackSelf
+//                      never tracks it again (manager.js removeRepo, trackSelf)
 //   "lastCheck"        { at, updates } of the last checkAll (older ones also
 //                      hold errors, no longer read)
 //   "key:owner/name"   base64 PKCS#8 RSA signing key for zip assets; written

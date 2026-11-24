@@ -31,13 +31,6 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
     erased: [],
     cancelled: [],
     uninstalled: [],
-    // [id, enabled] of every chrome.management.setEnabled call, in order.
-    setEnabledCalls: [],
-    // async (id, enabled) => {} runs after setEnabled changed the extension, e.g. to
-    // apply a delayed update the way Chromium does once the extension's process is gone.
-    onSetEnabled: null,
-    setEnabledError: null, // Error to throw from setEnabled(id, true), or null
-    reloads: 0, // chrome.runtime.reload() calls
     badge: "",
     alarms: new Map(), // name -> info of the last chrome.alarms.create
     hooks,
@@ -98,14 +91,6 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
         if (!e) throw new Error(`Failed to find extension with id ${id}.`);
         return clone(e);
       },
-      setEnabled: async (id, enabled) => {
-        const e = env.extensions.find((x) => x.id === id);
-        if (!e) throw new Error(`Failed to find extension with id ${id}.`);
-        env.setEnabledCalls.push([id, enabled]);
-        if (enabled && env.setEnabledError) throw env.setEnabledError;
-        e.enabled = enabled;
-        if (env.onSetEnabled) await env.onSetEnabled(id, enabled);
-      },
       uninstall: async (id) => {
         env.uninstalled.push(id);
         env.extensions = env.extensions.filter((e) => e.id !== id);
@@ -123,7 +108,6 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       get id() { return env.runtimeId; },
       getManifest: () => ({ manifest_version: 3, name: "Extainium", version: env.manifestVersion }),
       getPlatformInfo: async () => ({ os: env.platformOs, arch: "arm64" }),
-      reload: () => { env.reloads++; },
     },
     // Without a "webRequest" permission (or on a browser without the API) a test deletes it.
     // dispatch (fake only) delivers { requestId, url, redirectUrl } to the listeners.

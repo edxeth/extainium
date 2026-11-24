@@ -128,14 +128,6 @@ const RULES = [
   // releases.js asset template
   [/^asset template:/, () =>
     "That file name template is not valid. Use {version} for the version and * for any text, for example uBlock0_{version}.chromium.zip."],
-  // manager.js applyDelayed / restoreDisabled (Apply now of an added update)
-  [/^(?:apply|restore) \S+: could not turn extension \S+ on again/, () =>
-    "The extension could not be turned on again. Turn it on in the browser's extensions page."],
-  [/^apply \S+: no added update waits to be applied/, () =>
-    "No added update waits to be applied any more. Tap Check to see the current state."],
-  [/^apply \S+: (.+) is turned off; the browser applies (\S+) when it is turned on/, (m) =>
-    `${m[1]} is turned off. Chromium applies ${m[2]} when it is turned on again, at the latest when the browser restarts.`],
-  [/^apply \S+: extension \S+ is not installed/, () => "This extension is no longer installed, so there is nothing to apply."],
   // manager.js install guards
   [/confirm the identity change first/, () =>
     "This release installs as a separate extension. Tap Use the new ID on the card first, or choose another asset."],

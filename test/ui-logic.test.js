@@ -80,8 +80,8 @@ test("a self-hosted record whose server answers noupdate offers no Reinstall; on
   [view] = await trackedView();
   assert.deepEqual([view.state, offersInstall(view)], ["update", true]);
   assert.equal(offersInstall({ ...view, state: "identity-change" }), false, "an identity change is confirmed first");
-  // Requirement: an added update waiting to be applied never asks to install again.
-  assert.equal(offersInstall({ ...view, state: "delayed" }), false, "added, waiting to be applied");
+  // Owner decision: a vanished copy is only a hint, so a waiting card still offers the install.
+  assert.equal(offersInstall({ ...view, state: "waiting" }), true, "the prompt may have been cancelled");
 });
 
 // ---- F5: the popup does not call a not-offered record up to date ----
@@ -96,14 +96,14 @@ test("the popup summary counts a store record the server offers no build of as n
   assert.equal(popupSummary([]).state, "empty");
 });
 
-// Requirement: an added update waiting to be applied is neither an update to install nor "all up to date".
-test("the popup summary lists added updates that wait to be applied apart from updates", () => {
+// Requirement: an update waiting for Chromium is neither an update to install nor "all up to date".
+test("the popup summary lists updates waiting for Chromium apart from updates", () => {
   const v = (key, state) => ({ key, state });
-  const only = popupSummary([v("a", "delayed"), v("b", "current")]);
-  assert.deepEqual([only.state, only.updates, only.delayed.map((x) => x.key)], ["delayed", [], ["a"]]);
+  const only = popupSummary([v("a", "waiting"), v("b", "current")]);
+  assert.deepEqual([only.state, only.updates, only.waiting.map((x) => x.key)], ["waiting", [], ["a"]]);
   assert.notEqual(only.headline, popupSummary([v("b", "current")]).headline);
-  const mixed = popupSummary([v("a", "delayed"), v("c", "update")]);
-  assert.deepEqual([mixed.state, mixed.updates.map((x) => x.key), mixed.delayed.map((x) => x.key)], ["update", ["c"], ["a"]]);
+  const mixed = popupSummary([v("a", "waiting"), v("c", "update")]);
+  assert.deepEqual([mixed.state, mixed.updates.map((x) => x.key), mixed.waiting.map((x) => x.key)], ["update", ["c"], ["a"]]);
 });
 
 // ---- F14: the error count follows the records' current errors ----

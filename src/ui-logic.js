@@ -39,10 +39,10 @@ export function askOrigins(request, origins, { required }) {
 export const cardId = (key) => `card-${key.replace(/[^a-z0-9]/gi, (c) => `_${c.codePointAt(0).toString(16)}_`)}`;
 
 // True when the card of trackedView entry v offers Install / Update /
-// Reinstall: the lib says a downloadable build exists (canInstall), no
-// identity change waits for confirmation, and the latest build is not added
-// already, waiting to be applied ("delayed": installing again changes nothing).
-export const offersInstall = (v) => !!v.canInstall && v.state !== "identity-change" && v.state !== "delayed";
+// Reinstall / Install again: the lib says a downloadable build exists
+// (canInstall) and no identity change waits for confirmation. A "waiting"
+// card keeps it: a vanished copy does not prove the prompt was accepted.
+export const offersInstall = (v) => !!v.canInstall && v.state !== "identity-change";
 
 // Set by the storage migration when a 0.1 regex pattern had no template form:
 // a to-do on the card, not a failed check.
@@ -64,23 +64,23 @@ export function checkLine(lastCheck, view, when) {
 }
 
 // The popup's headline for trackedView's view: { state: "empty" | "update" |
-// "attention" | "delayed" | "current", updates, attention (entries that need a
+// "attention" | "waiting" | "current", updates, attention (entries that need a
 // look in Extainium: an identity change, or a server that offers no build to
-// this browser), delayed (updates added that the browser applies when the
-// extension restarts), headline }.
+// this browser), waiting (updates Chromium may apply when the extension
+// restarts, trackedView's "waiting"), headline }.
 export function popupSummary(view) {
   const updates = view.filter((v) => v.state === "update");
   const attention = view.filter((v) => v.state === "identity-change" || v.state === "not-offered");
-  const delayed = view.filter((v) => v.state === "delayed");
-  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : delayed.length ? "delayed" : "current";
+  const waiting = view.filter((v) => v.state === "waiting");
+  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : waiting.length ? "waiting" : "current";
   const headline = state === "empty"
     ? "No tracked extensions"
     : state === "update"
       ? `${plural(updates.length, "update", "updates")} available`
       : state === "attention"
         ? `${plural(attention.length, "extension needs", "extensions need")} attention`
-        : state === "delayed"
-          ? `${plural(delayed.length, "update waits", "updates wait")} for a restart`
+        : state === "waiting"
+          ? `${plural(waiting.length, "update", "updates")} waiting for Chromium`
           : "All up to date";
-  return { state, updates, attention, delayed, headline };
+  return { state, updates, attention, waiting, headline };
 }

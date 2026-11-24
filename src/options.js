@@ -1,5 +1,5 @@
 import {
-  PENDING_GRACE_MS, addRepo, applyDelayed, checkAll, checkRepo, chooseAsset, confirmIdentityChange, dismissInstallBlocked, environment, fileKeysView, forgetFileKey,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, dismissInstallBlocked, environment, fileKeysView, forgetFileKey,
   handOffState, importBackup, installFile, installRelease, installedOverview, isPromptWaiting, linkInstalledToGithub, refreshBadge,
   removeRepo, saveBackup, setGithubToken, setPrereleases, setTemplate, trackInstalled, trackInstalledFile, trackedView,
   whenQueued,
@@ -194,7 +194,7 @@ const STATE_LABEL = {
   unknown: "Version unknown",
   "not-offered": "Not offered",
   "identity-change": "New extension ID",
-  delayed: "Added, not applied yet",
+  waiting: "Waiting for Chromium",
 };
 const extOf = (name) => (name.match(/\.(crx|zip)$/i) || [])[1];
 
@@ -374,33 +374,17 @@ function identityNotice(key, change, title) {
       h("button", { "data-ctl": "identity", "aria-label": `Use the new ID for ${title}`, onclick: () => cardAct(key, async () => { await confirmIdentityChange(key); }) }, "Use the new ID")));
 }
 
-// The browser applies an added update when the extension restarts (Chromium delays it while it runs).
-const delayedText = (name, version) => `Added. Chromium applies ${version} when ${name} restarts, at the latest when the browser restarts.`;
+// A hand-off whose copy vanished without an install event (the lib's "waiting"):
+// Chromium may apply it later, or the prompt was cancelled or the install failed.
+const waitingText = (name, version) =>
+  `If you clicked Add, Chromium applies ${version} when ${name} restarts, at the latest after a browser restart. If you cancelled, install again.`;
 
-// Install handed to the browser and not confirmed yet. Accepted but not applied
-// yet (pending.delayed): says so, with Apply now while the extension is on.
-// Otherwise, after the grace period from its prompt (the lib's clock,
-// isPromptWaiting) the prompt was most likely dismissed; the entry stays until
-// the lib forgets it.
-function pendingLine(pending, v, title) {
-  if (pending.delayed) {
-    const self = v.record.extensionId === chrome.runtime.id;
-    const canApply = !!(v.ext && v.ext.enabled);
-    return h("div", { className: "card-status delayed" },
-      h("p", {}, delayedText(title, pending.version)),
-      canApply
-        ? h("div", { className: "card-actions" },
-            h("button", {
-              "data-ctl": "apply", "aria-label": `Apply ${pending.version} of ${title} now`,
-              onclick: () => cardAct(v.key, async (progress) => {
-                progress(self ? "Restarting Extainium…" : `Restarting ${title}…`);
-                const r = await applyDelayed(v.key);
-                return r.applied ? `${title} ${r.version} applied.` : `Chromium did not apply ${r.version} yet. It applies it when the browser restarts.`;
-              }, "Apply now"),
-            }, "Apply now"),
-            h("span", { className: "hint" }, self ? "Reloads Extainium; this page closes." : `Turns ${title} off for a few seconds; its open pages close.`))
-        : null);
-  }
+// Install handed to the browser and not confirmed yet. Its copy vanished
+// (pending.waiting): tentative, says so. Otherwise, after the grace period from
+// its prompt (the lib's clock, isPromptWaiting) the prompt was most likely
+// dismissed; the entry stays until the lib forgets it.
+function pendingLine(pending, title) {
+  if (pending.waiting) return h("p", { className: "card-status" }, waitingText(title, pending.version));
   if (isPromptWaiting(pending)) {
     return h("p", { className: "card-status" }, h("span", { className: "spinner", "aria-hidden": "true" }),
       `Waiting for the browser to confirm ${pending.version}…`);
@@ -425,7 +409,7 @@ function card(v) {
   const name = github ? `${record.owner}/${record.repo}` : title;
   const needs = v.needsOrigins || [];
   const titleId = `title-${key}`;
-  const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
+  const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : state === "waiting" ? "Install again" : "Reinstall";
   const identity = state === "identity-change";
   // The lib's canInstall: a downloadable build (a self-hosted "noupdate" has none).
   const canInstall = offersInstall(v);
@@ -552,7 +536,7 @@ function card(v) {
       : null,
     checkError ? errorLine("check-error", friendly(checkError, { retry: "Check" })) : null,
     status.text ? h("p", { className: "card-status" }, status.busy ? h("span", { className: "spinner", "aria-hidden": "true" }) : null, status.text) : null,
-    !status.busy && !status.text && pendingInstall ? pendingLine(pendingInstall, v, title) : null,
+    !status.busy && !status.text && pendingInstall ? pendingLine(pendingInstall, title) : null,
     status.error ? errorLine("card-error", status.error) : null,
     (github && !record.template) || canInstall
       ? h("div", { className: "card-actions" },
@@ -941,7 +925,7 @@ async function renderNow() {
     if (el) el.focus({ preventScroll: true });
   }
   scheduleGrace(view);
-  await fileInstallDelayed();
+  await followFileInstall();
   $("empty").hidden = view.length > 0;
   const updates = view.filter((v) => v.state === "update").length;
   $("updateCount").hidden = !updates;
@@ -999,21 +983,38 @@ $("addForm").addEventListener("submit", (e) => {
   }, "addStatus");
 });
 
-// The install from a file waiting at the browser's prompt: { id, version, name, token, timer },
-// or null. Its status line follows the prompt as the cards do: added on the browser's
-// confirmation, added but not applied yet when the lib found it accepted and delayed
-// (fileInstallDelayed, on each render), not confirmed once the grace period after the
-// prompt passed.
+// The install from a file handed to the browser: { id, version, name, token, timer,
+// shown }, or null. Its status line follows it as the cards do until the browser
+// confirms it (management.onInstalled, or the lib's state on a render) or the lib
+// ends it: not confirmed once the grace period after the prompt passed, waiting
+// for Chromium while the lib says its copy vanished (followFileInstall, on each
+// render and after the grace period).
 let fileWatch = null;
 function watchFileInstall(next) {
   if (fileWatch) clearTimeout(fileWatch.timer);
   fileWatch = next;
 }
-async function fileInstallDelayed() {
+async function followFileInstall() {
   const watch = fileWatch;
-  if (!watch || (await handOffState(watch.token)) !== "delayed" || fileWatch !== watch) return;
-  say("fileStatus", delayedText(watch.name, watch.version));
-  watchFileInstall(null);
+  if (!watch) return;
+  const state = await handOffState(watch.token);
+  if (fileWatch !== watch) return;
+  if (state === "confirmed") {
+    say("fileStatus", `${watch.name} ${watch.version} added.`);
+    watchFileInstall(null);
+  } else if (state === null) {
+    // Ended: confirmed and cleaned up (the browser runs that version), or replaced, uninstalled or expired.
+    const ext = await chrome.management.get(watch.id).catch(() => null);
+    if (fileWatch !== watch) return;
+    if (ext && ext.version === watch.version) say("fileStatus", `${watch.name} ${watch.version} added.`);
+    watchFileInstall(null);
+  } else if (state === "waiting" && watch.shown !== "waiting") {
+    watch.shown = "waiting";
+    say("fileStatus", waitingText(watch.name, watch.version));
+  } else if (state === "pending" && watch.shown !== "pending" && !isPromptWaiting({ promptAt: watch.promptAt })) {
+    watch.shown = "pending";
+    say("fileStatus", `The browser has not confirmed ${watch.name} ${watch.version}. If you dismissed the prompt, install again.`);
+  }
 }
 function fileInstallAdded(info) {
   if (!fileWatch || info.id !== fileWatch.id || info.version !== fileWatch.version) return;
@@ -1039,15 +1040,9 @@ $("fileInstall").addEventListener("click", (e) =>
     $("fileResult").textContent = `${res.name} ${res.installed.version} → ID ${res.extensionId}.`;
     const name = res.name || file.name;
     if (res.confirmed) return `${name} ${res.installed.version} added.`;
-    const pending = { promptAt: res.promptAt };
     watchFileInstall({
-      id: res.extensionId, version: res.installed.version, name, token: res.token,
-      timer: setTimeout(async () => {
-        const state = await handOffState(res.token);
-        if (state === "delayed") say("fileStatus", delayedText(name, res.installed.version));
-        else if (state !== "confirmed" && !isPromptWaiting(pending)) say("fileStatus", `The browser has not confirmed ${name} ${res.installed.version}. If you dismissed the prompt, install again.`);
-        watchFileInstall(null);
-      }, Math.max(0, res.promptAt + PENDING_GRACE_MS - Date.now()) + 50),
+      id: res.extensionId, version: res.installed.version, name, token: res.token, promptAt: res.promptAt, shown: null,
+      timer: setTimeout(followFileInstall, Math.max(0, res.promptAt + PENDING_GRACE_MS - Date.now()) + 50),
     });
     return "Confirm the browser prompt to add the extension.";
   }, "fileStatus")
