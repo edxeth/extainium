@@ -200,7 +200,8 @@ export async function confirmIdentityChange(key) {
 export async function setTemplate(key, template) {
   await ready();
   validateTemplate(template);
-  await patchRepo(key, { template });
+  // A new template replaces whatever made the old one fail (e.g. a migration error).
+  await patchRepo(key, { template, error: null });
   return link(key);
 }
 
