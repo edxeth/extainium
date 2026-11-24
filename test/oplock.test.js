@@ -16,6 +16,8 @@ import { fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 
 const worker = await import("../src/lib/manager.js?context=worker");
 const popup = await import("../src/lib/manager.js?context=popup");
+// The fakes' file check is instant, so the sweep's wait for the browser's file check need not be real.
+for (const m of [page, worker, popup]) m.cleanupTiming.settleMs = 1;
 
 const zip = new Uint8Array(readFileSync(new URL("./fixtures/ext-root.zip", import.meta.url))); // manifest version 1.0
 const K = "o/r";

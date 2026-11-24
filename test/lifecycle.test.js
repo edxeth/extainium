@@ -11,6 +11,8 @@ import { fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 const { importBackup, installFile, installRelease, setPrereleases, sweepDownloads, trackedView } = manager;
 const zip = new Uint8Array(readFileSync(new URL("./fixtures/ext-root.zip", import.meta.url))); // manifest version 1.0
 const K = "o/r";
+// The fakes' file check is instant, so the sweep's wait for the browser's file check need not be real.
+manager.cleanupTiming.settleMs = 1;
 
 async function crxKey() {
   const { privateKey } = nodeCrypto.generateKeyPairSync("rsa", { modulusLength: 2048 });

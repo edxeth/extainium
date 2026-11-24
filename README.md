@@ -96,8 +96,20 @@ install" (then relaunch). Without it the download completes and nothing
 installs; Extainium notices that (the browser deletes the copy at once) and
 says so, also when the page that started the install was closed meanwhile
 (the background clean-up checks it). ungoogled-chromium does not update extensions by itself, so track
-store and self-hosted extensions, and Extainium itself, from the
-**Installed** list.
+store and self-hosted extensions from the **Installed** list. Extainium tracks
+itself through its own update address on its first start there (once: remove
+its card to stop that); on Titanium the browser updates Extainium.
+
+Chromium waits with an update of an extension that is running (its background
+worker or one of its pages is active): after **Add extension** it says the
+extension was added, but the old version keeps running until the extension
+stops, at the latest until the browser restarts. Extainium recognises this
+(the browser deleted the downloaded file, but did not report the new version)
+and shows "Added. Chromium applies <version> when <name> restarts …" instead of
+asking to install again; it marks the update done once the browser reports it,
+also after a browser restart. **Apply now** turns the extension off until
+Chromium applies the update (about five seconds) and on again; for Extainium
+itself it reloads Extainium.
 
 ### How the install works on Titanium
 

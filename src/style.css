@@ -302,6 +302,10 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
   font-size: var(--fs-sm); color: var(--fg);
   background: var(--surface-2); border-radius: var(--r-md); padding: 8px 12px; overflow-wrap: anywhere;
 }
+/* An added update waiting for the extension's restart: the text, then Apply now with its hint. */
+.card-status.delayed { display: grid; gap: 8px; }
+.card-status.delayed p { margin: 0; }
+.card-status.delayed .card-actions { align-items: center; }
 .card .error { background: var(--err-tint); border-radius: var(--r-md); padding: 8px 12px; }
 
 /* A to-do or warning that needs the user: identity change, asset to choose again, import conflicts. */

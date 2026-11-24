@@ -6,13 +6,15 @@ import fc from "fast-check";
 import { extensionIdFromCrx } from "../src/lib/crx.js";
 import {
   NO_DOWNLOAD_ID_MS, PENDING_GRACE_MS, addRepo, checkRepo, chooseAsset, exportBackup, fileKeysView, handleExtensionInstalled, importBackup,
-  installFile, installRelease, removeRepo, setPrereleases, sweepDownloads, trackInstalledFile, trackedView,
+  cleanupTiming, installFile, installRelease, removeRepo, setPrereleases, sweepDownloads, trackInstalledFile, trackedView,
 } from "../src/lib/manager.js";
 import { newRecord, parseBackup } from "../src/lib/store.js";
 import { exportedKey, fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 
 const zip = new Uint8Array(readFileSync(new URL("./fixtures/ext-root.zip", import.meta.url)));
 const K = "o/r";
+// The fakes' file check is instant, so the sweep's wait for the browser's file check need not be real.
+cleanupTiming.settleMs = 1;
 
 // Independent reference: Chromium's ID is hex(sha256(spki)[0..16]) with 0-f -> a-p.
 function idOfPkcs8(b64) {

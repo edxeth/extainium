@@ -71,6 +71,13 @@ const CASES = [
   [`add repo: extension ${ID} is already tracked as o/r`, "This extension is already tracked as o/r. Its card is on the Extensions tab."],
   [`track ${ID}: no installed extension has this ID`, "This extension is no longer installed, so nothing was tracked."],
   [`link ${ID}: not a GitHub repository: "abc"`, "Enter the extension's GitHub repository as owner/repo or a github.com link."],
+  // Apply now of an added update that waits to be applied (manager.js applyDelayed)
+  ["apply o/r: no added update waits to be applied", "No added update waits to be applied any more. Tap Check to see the current state."],
+  ["apply o/r: Dark Reader is turned off; the browser applies 4.9.99 when it is turned on, at the latest when the browser restarts",
+    "Dark Reader is turned off. Chromium applies 4.9.99 when it is turned on again, at the latest when the browser restarts."],
+  [`apply url:${ID}: extension ${ID} is not installed`, "This extension is no longer installed, so there is nothing to apply."],
+  [`apply o/r: could not turn extension ${ID} on again: Extension is blocked`,
+    "The extension could not be turned on again. Turn it on in the browser's extensions page."],
 ];
 
 test("each kind of source error gets its own plain text with the next step", () => {
