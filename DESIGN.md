@@ -17,7 +17,7 @@ Tokens live in `src/style.css` :root; the popup shares them.
 
 ## Color
 One accent: the blue the badge already uses (#0b57d0, set in lib/manager.js), so the page and the toolbar badge match. Not violet. Light/dark follow prefers-color-scheme through light-dark().
-Theme setting (Files & settings > Theme: System / Light / Dark): data-theme on <html> sets color-scheme before the first paint; with System the options page uses its own scheme and records it, and the popup uses that recorded scheme (Titanium's popup reports light while its tabs are dark). Status chips are tinted surfaces with a dot and a word: Up to date (green), Update available (accent), Not installed (neutral), Ambiguous asset / No asset / Version unknown (amber), Error (red, when the last check failed).
+Theme setting (Files & settings > Theme: System / Light / Dark): data-theme on <html> sets color-scheme before the first paint; with System the options page uses its own scheme and records it, and the popup uses that recorded scheme (Titanium's popup reports light while its tabs are dark). Status chips are tinted surfaces with a dot and a word: Up to date (green), Update available (accent), Not installed (neutral), Ambiguous asset / No asset / Version unknown / Not offered (amber; a store record the server offers no build of, with "the store flags it as malware" when the answer says so), Error (red, when the last check failed).
 
 ## Type
 16px base, 14px meta, 18px card titles, 22px app name. Tabular figures for versions, dates, counts. Inputs 16px (no zoom on focus).

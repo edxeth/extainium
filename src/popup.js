@@ -59,20 +59,23 @@ function row(v) {
         pending ? " · waiting for the browser" : null)));
 }
 
-// A release that would install as another extension: confirmed in Extainium.
+// Needs a look in Extainium: a release that would install as another extension, or a
+// store or self-hosted record whose server offers no build to this browser.
 function attentionRow(v) {
+  const why = v.state === "identity-change"
+    ? `${v.record.identityChange.tag || v.record.identityChange.asset} installs as a new extension. Review in Extainium.`
+    : `${v.source === "cws" ? "The Chrome Web Store" : v.sourceLabel || "Its update server"} offers no build to this browser. Review in Extainium.`;
   return h("li", {},
     avatar(v),
     h("div", { className: "row-text" },
       h("strong", {}, titleOf(v)),
-      h("span", { className: "versions-line attention" },
-        `${v.record.identityChange.tag || v.record.identityChange.asset} installs as a new extension. Review in Extainium.`)));
+      h("span", { className: "versions-line attention" }, why)));
 }
 
 async function render() {
   const view = await trackedView();
   const updates = view.filter((v) => v.state === "update");
-  const attention = view.filter((v) => v.state === "identity-change");
+  const attention = view.filter((v) => v.state === "identity-change" || v.state === "not-offered");
   const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : "current";
   document.body.dataset.state = state;
   const summary = state === "empty"

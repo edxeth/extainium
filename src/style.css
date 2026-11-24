@@ -281,7 +281,7 @@ body.checking .appbar::after { opacity: 1; animation: indeterminate 1.4s linear 
 .state::before { content: ""; inline-size: 8px; block-size: 8px; border-radius: 50%; background: currentColor; }
 .state.update { background: var(--accent-tint); color: var(--accent); }
 .state.current { background: var(--ok-tint); color: var(--ok); }
-.state.no-asset, .state.ambiguous, .state.unknown, .state.identity-change { background: var(--warn-tint); color: var(--warn); }
+.state.no-asset, .state.ambiguous, .state.unknown, .state.not-offered, .state.identity-change { background: var(--warn-tint); color: var(--warn); }
 .state.failed { background: var(--err-tint); color: var(--err); }
 
 .versions { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 8px; margin: 0; }
@@ -363,7 +363,8 @@ button.asset .muted { font-size: var(--fs-sm); white-space: nowrap; font-variant
 
 /* ---- installed tab ---- */
 #installedInfo { margin-block: 4px 12px; font-variant-numeric: tabular-nums; }
-.installed { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }
+/* By id: the card's "Installed" version tile also has the class installed. */
+#installedList { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }
 .ext-group { display: grid; gap: 8px; min-inline-size: 0; }
 .ext-group h2 { display: flex; align-items: baseline; gap: 8px; }
 .group-count { font-size: var(--fs-sm); font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -490,8 +491,8 @@ html:has(.sheet[open]) { overflow: hidden; }
   /* Columns, not grid rows: a tall card does not leave a gap under its short neighbour. */
   #list { display: block; columns: 2; column-gap: 12px; }
   #list > .card { break-inside: avoid; margin-block-end: 12px; }
-  .installed { display: block; columns: 2; column-gap: 24px; }
-  .installed > .ext-group { break-inside: avoid; margin-block-end: 24px; }
+  #installedList { display: block; columns: 2; column-gap: 24px; }
+  #installedList > .ext-group { break-inside: avoid; margin-block-end: 24px; }
   #panelTools { max-inline-size: 720px; }
 }
 

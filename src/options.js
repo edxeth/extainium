@@ -1,11 +1,12 @@
 import {
-  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, environment, fileKeysView, forgetFileKey,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, dismissInstallBlocked, environment, fileKeysView, forgetFileKey,
   importBackup, installFile, installRelease, installedOverview, isPromptWaiting, linkInstalledToGithub, refreshBadge,
   removeRepo, saveBackup, setGithubToken, setPrereleases, setTemplate, trackInstalled, trackInstalledFile, trackedView,
   whenQueued,
 } from "./lib/manager.js";
 import { getRepo, getSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
+import { CWS_ORIGINS, parseSourceInput } from "./lib/sources.js";
 import { friendly } from "./friendly.js";
 import { setTheme, startTheme } from "./theme.js";
 
@@ -193,6 +194,7 @@ const STATE_LABEL = {
   update: "Update available",
   current: "Up to date",
   unknown: "Version unknown",
+  "not-offered": "Not offered",
   "identity-change": "New extension ID",
 };
 // Set by the storage migration when a 0.1 regex pattern had no template form.
@@ -411,7 +413,8 @@ function card(v) {
   const titleId = `title-${key}`;
   const installLabel = state === "update" ? "Update" : state === "not-installed" ? "Install" : "Reinstall";
   const identity = state === "identity-change";
-  const canInstall = github ? latest && latest.asset && !identity : !!latest;
+  // Store and self-hosted: only a build with a download (a self-hosted "noupdate" has codebase null).
+  const canInstall = github ? latest && latest.asset && !identity : !!(latest && latest.codebase);
   // A migration that could not convert the pattern asks for the asset again: a
   // to-do on the "No asset" card, not a failed check. Once a template is set it is stale.
   const converted = isConversionError(record.error);
@@ -425,7 +428,9 @@ function card(v) {
     ? latest
       ? h("dd", {}, latest.version, latest.size ? h("span", { className: "sub" }, formatSize(latest.size)) : null)
       : h("dd", {}, "—", h("span", { className: "sub" },
-          state === "not-offered" ? "Not offered to this browser" : record.checkedAt ? "No version found" : "Not checked yet"))
+          state === "not-offered"
+            ? record.unavailable && record.unavailable.malware ? "Not offered: the store flags it as malware" : "Not offered to this browser"
+            : record.checkedAt ? "No version found" : "Not checked yet"))
     : latest
     ? h("dd", {}, latest.tag,
         h("span", { className: "sub" },
@@ -644,7 +649,8 @@ function removeControls(key, record, hasKey, name, title) {
     hint);
 }
 
-const cardId = (key) => `card-${key.replace(/[^a-z0-9_-]/gi, "-")}`;
+// Injective: every character other than a-z, 0-9 becomes _<hex code>_ ("_" included).
+const cardId = (key) => `card-${key.replace(/[^a-z0-9]/gi, (c) => `_${c.codePointAt(0).toString(16)}_`)}`;
 
 // ---- Installed tab ----
 // Every installed extension, grouped by kind, each row with one action: Track (store or own
@@ -842,10 +848,10 @@ $("installedList").addEventListener("focusin", (e) => {
 });
 
 // ---- desktop flag banner ----
-// Shown once: when installs need the browser flag and the lib saw an install refused.
-const FLAG_DISMISSED = "extainium.flagBannerDismissed";
+// Shown while installs need the browser flag and the lib recorded a refused install
+// (view.installBlocked). Dismiss makes the lib forget it; the next refusal shows it again.
 function renderBanner(view) {
-  $("flagBanner").hidden = !(env.installNeedsFlag && view.installBlocked && !localStorage.getItem(FLAG_DISMISSED));
+  $("flagBanner").hidden = !(env.installNeedsFlag && view.installBlocked);
 }
 $("flagCopy").addEventListener("click", async () => {
   try {
@@ -855,10 +861,20 @@ $("flagCopy").addEventListener("click", async () => {
     say("flagStatus", "Copying was refused. Select the address above and copy it.", true, e.message);
   }
 });
-$("flagDismiss").addEventListener("click", () => {
-  localStorage.setItem(FLAG_DISMISSED, String(Date.now()));
-  $("flagBanner").hidden = true;
-  $("tabList").focus();
+$("flagDismiss").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  if (button.getAttribute("aria-disabled") === "true") return;
+  setBusy(button, true);
+  try {
+    await dismissInstallBlocked();
+    $("flagBanner").hidden = true;
+    $("tabList").focus();
+  } catch (err) {
+    console.error(err);
+    const f = friendly(err);
+    say("flagStatus", f.text, true, f.detail);
+  }
+  setBusy(button, false);
 });
 
 let rendering = Promise.resolve();
@@ -959,8 +975,19 @@ $("checkAll").addEventListener("click", (e) =>
 
 $("addForm").addEventListener("submit", (e) => {
   e.preventDefault();
+  const input = $("addInput").value;
+  // A store item is checked right away, so the CWS hosts are asked for in this submit
+  // gesture, before anything awaits. Input that does not parse fails inside addRepo.
+  let parsed = null;
+  try {
+    parsed = parseSourceInput(input);
+  } catch {
+    parsed = null;
+  }
+  const asked = parsed && parsed.source === "cws" ? requestOrigins(CWS_ORIGINS) : Promise.resolve();
   act(e.submitter, async () => {
-    const key = await addRepo($("addInput").value);
+    await asked; // declined: nothing is added
+    const key = await addRepo(input);
     $("addInput").value = "";
     // A GitHub repo next asks for its release asset; store records (cws:<id>) have none.
     if (!/^(?:cws|url):/.test(key)) queuePicker(key, $("addInput"));
