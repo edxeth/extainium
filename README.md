@@ -7,14 +7,23 @@ a Chromium browser with desktop extension support.
 
 ## Install
 
-1. Download `extainium.crx` from the [latest release](../../releases/latest).
-2. In Titanium, open the extensions menu > **Titanium** > **Options** and use
-   **Install from file** to pick the downloaded file. Accept the "Add extension"
-   prompt.
-3. Extainium updates itself from this repo's latest release.
+1. In Titanium, open the [latest release](../../releases/latest) and tap
+   `extainium.crx`; in "Choose where to download" tap **Download**.
+2. Open the main menu (⋮) > **Extensions** > **Open extensions menu**, tap ⋮ next
+   to **Titanium** > **Options** (the "Titanium Extension" page).
+3. Under **Extension marketplaces**, at **Install from file**, tap **Set**, pick
+   `extainium.crx`, then tap **Go**.
+4. Titanium may ask "Download file again?" (tap **Download**) and "Confirm
+   download" (tap **Keep**). Then tap **Add extension** and **Got it**.
+5. Extainium updates itself from this repo's latest release. An update takes
+   effect once no Extainium tab is open; to update right away, tap **Update** on
+   Titanium's extensions page (developer mode).
 
-Titanium's Safety Check may list Extainium as an extension it "can't verify",
-as it does for any extension not installed from a store.
+Titanium's extensions page lists Extainium under "Review 1 extension that may
+be unsafe" ("can't verify where this extension comes from"). Chromium shows
+this for every extension whose update address is not the Chrome Web Store's,
+and nothing in an extension can avoid it. Tap **Keep this extension** once; it
+stays dismissed across updates.
 
 ## Use
 
