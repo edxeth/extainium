@@ -134,3 +134,35 @@ test("a download whose end is never reported ends as not confirmed after the tim
   assert.equal(env.erasedListeners.size, 0);
 });
 
+
+// ---- Closure review F8: search is optional and never decides or blocks ----
+
+// F8 repro (save-search): a failing search overrode the complete event.
+test("a failing downloads.search does not override the complete event", async () => {
+  const env = setup();
+  env.onDownloadStarted = async (id) => env.emitChanged({ id, state: { current: "complete" } });
+  chrome.downloads.search = async () => { throw new Error("search unavailable"); };
+  assert.deepEqual(await saveBackup("b.json"), { saved: true, id: 1, error: null });
+});
+
+// F8 repro (save-search-hangs): a search that never returns blocked the time limit.
+test("a downloads.search that never returns does not block the time limit", async (t) => {
+  const env = setup();
+  const saved = { ...manager.saveTiming };
+  manager.saveTiming.confirmMs = 15;
+  t.after(() => Object.assign(manager.saveTiming, saved));
+  env.onDownloadStarted = async (id) => { env.files.delete(id); };
+  chrome.downloads.search = () => new Promise(() => {});
+  const result = await Promise.race([saveBackup("b.json"), new Promise((r) => setTimeout(() => r("still waiting"), 500))]);
+  assert.notEqual(result, "still waiting");
+  assert.equal(result.saved, false);
+  assert.match(result.error, /could not confirm/);
+  assert.equal(env.changedListeners.size, 0, "listeners are removed");
+});
+
+// Search may still add an end the events did not bring.
+test("a downloads.search that finds the download complete reports it saved", async () => {
+  const env = setup();
+  env.newDownloadState = "complete";
+  assert.deepEqual(await saveBackup("b.json"), { saved: true, id: 1, error: null });
+});

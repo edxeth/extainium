@@ -291,6 +291,73 @@ test("a truncated releases.atom falls back to the API", async () => {
   assert.equal(apiRequests(gh).length, 1);
 });
 
+// ---- Closure review F6: only GitHub's plain Atom form is accepted ----
+
+// F6 repro (feed-prefixed-entry): a valid Atom entry under a declared prefix
+// was skipped, so the shortcut missed the new release.
+test("a feed whose new entry uses an Atom prefix is rejected, so the check uses the API and finds the release", async () => {
+  const gh = await feedSetup();
+  gh.releases.unshift(zipRel("v2", { publishedAt: "2026-11-01T00:00:00Z" }));
+  gh.feed = atomFeed(gh.releases).replace("<feed xmlns=", '<feed xmlns:a="http://www.w3.org/2005/Atom" xmlns=').replace("<entry>", "<a:entry>").replace("</entry>", "</a:entry>");
+  assert.throws(() => parseReleaseFeed(gh.feed), /unsupported namespace declaration xmlns:a="http:\/\/www\.w3\.org\/2005\/Atom" on <feed>/);
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+  assert.equal((await trackedView())[0].latest.tag, "v2");
+});
+
+// F6 repro (feed-inherited-entity): "toString" was found on the entity table's prototype.
+test("an entity other than the five predefined ones is rejected, also one named like an object property", () => {
+  for (const name of ["toString", "constructor", "nbsp"]) {
+    const doc = atomDoc(`<entry><id>x</id><updated>2026-11-24T00:00:00Z</updated><title>&${name};</title></entry>`);
+    assert.throws(() => parseReleaseFeed(doc), new RegExp(`bad character reference "&${name};"`));
+  }
+});
+
+test("prefixed elements other than GitHub's declared media:*, and prefixed attributes other than xml:*, are rejected", () => {
+  const entry = (inner) => `<entry><id>x</id><updated>2026-11-24T00:00:00Z</updated>${inner}</entry>`;
+  const media = (entries) => `<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">${entries}</feed>`;
+  assert.deepEqual(parseReleaseFeed(media(entry('<media:thumbnail height="30" width="30" url="u"/>'))), [{ id: "x", updated: "2026-11-24T00:00:00Z" }]);
+  assert.throws(() => parseReleaseFeed(atomDoc(entry('<media:thumbnail url="u"/>'))), /unsupported element <media:thumbnail>/, "media: undeclared");
+  assert.throws(() => parseReleaseFeed(media(entry('<x:note xmlns:x="urn:x"/>'))), /unsupported namespace declaration xmlns:x/);
+  assert.throws(() => parseReleaseFeed(media(entry("<x:note/>"))), /unsupported element <x:note>/);
+  assert.throws(() => parseReleaseFeed(media(entry('<title x:y="1">t</title>'))), /unsupported prefixed attribute x:y/);
+  assert.throws(() => parseReleaseFeed('<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="urn:other"></feed>'), /unsupported namespace declaration xmlns:media="urn:other"/);
+});
+
+// ---- Closure review F10: the stored feed snapshot is compared entry by entry ----
+
+// F10 repro (feed-max-misses-change): a tag-only entry with a future commit date
+// stayed the newest entry while a new release appeared.
+test("a new release in the feed calls the API although another entry has a later time", async () => {
+  const gh = await feedSetup("");
+  const tagOnly = { tag: "future-tag", updatedAt: "2027-01-01T00:00:00Z" };
+  gh.feed = atomFeed([tagOnly, ...gh.releases]);
+  await checkRepo("o/r");
+  gh.releases.unshift(zipRel("v2", { publishedAt: "2026-11-24T12:00:00Z" }));
+  gh.feed = atomFeed([tagOnly, ...gh.releases]);
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1);
+  assert.equal((await trackedView())[0].latest.tag, "v2");
+});
+
+test("a feed entry that went away or changed its id calls the API", async () => {
+  const gh = await feedSetup("");
+  const tags = [{ tag: "t2", updatedAt: "2026-06-01T00:00:00Z" }, { tag: "t1", updatedAt: "2026-05-01T00:00:00Z" }];
+  gh.feed = atomFeed([...tags, ...gh.releases]);
+  await checkRepo("o/r");
+  gh.requests.length = 0;
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 0, "unchanged: the feed decides");
+  gh.feed = atomFeed([tags[0], ...gh.releases]);
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 1, "an entry went away");
+  gh.feed = atomFeed([{ tag: "t3", updatedAt: "2026-06-01T00:00:00Z" }, ...gh.releases]);
+  await checkRepo("o/r");
+  assert.equal(apiRequests(gh).length, 2, "an entry changed its id");
+});
+
 // ---- Round 3 F9: property test of the Atom parser against the generator's own entries ----
 
 const XML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };

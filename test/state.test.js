@@ -5,7 +5,7 @@ import nodeCrypto from "node:crypto";
 import fc from "fast-check";
 import { extensionIdFromCrx } from "../src/lib/crx.js";
 import {
-  PENDING_GRACE_MS, addRepo, checkRepo, chooseAsset, exportBackup, fileKeysView, handleExtensionInstalled, importBackup,
+  NO_DOWNLOAD_ID_MS, PENDING_GRACE_MS, addRepo, checkRepo, chooseAsset, exportBackup, fileKeysView, handleExtensionInstalled, importBackup,
   installFile, installRelease, removeRepo, setPrereleases, sweepDownloads, trackInstalledFile, trackedView,
 } from "../src/lib/manager.js";
 import { newRecord, parseBackup } from "../src/lib/store.js";
@@ -38,6 +38,10 @@ const zipRelease = (tag, extra = {}) => ({ tag, assets: [{ name: "example.zip", 
 async function storedKey() {
   return exportedKey(await exportBackup(), K);
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// True while an operation waits for the operation lock.
+const opWaiting = async () => (await navigator.locks.query()).pending.some((l) => l.name === "extainium-op");
 
 // F1 regression: the schedule of the review's key-race repro. A check holds its
 // record write while an install generates the repo's first signing key.
@@ -201,10 +205,10 @@ async function installedFromFile(env) {
   return f;
 }
 
-// F1: an import that stores another key for the repo while trackInstalledFile
-// waits for the network check never leaves the record linked to the file's
-// extension without the file's key.
-test("tracking a file install while an import brings another key keeps the file's key with its link", async () => {
+// F1 (op lock): an import started while trackInstalledFile waits for the
+// network check runs after it, and never leaves the record linked to the
+// file's extension without the file's key.
+test("an import started while a file install is being tracked runs after it and keeps the file's key with its link", async () => {
   const env = fakeChrome();
   fakeGithub([{ tag: "v1", assets: [] }]);
   const f = await installedFromFile(env);
@@ -219,9 +223,12 @@ test("tracking a file install while an import brings another key keeps the file'
   const tracking = trackInstalledFile(K, f);
   await entered;
   const other = newPkcs8();
-  const result = await importBackup(keyBackup(other));
+  const importing = importBackup(keyBackup(other));
+  await sleep(10);
+  assert.ok(await opWaiting(), "the import waits for the track");
   release();
   await tracking;
+  const result = await importing;
   const rec = env.store["repo:" + K];
   assert.equal(rec.extensionId, f.extensionId);
   assert.equal(env.store["key:" + K], f.keyPkcs8, "the key of the linked extension is stored");
@@ -354,25 +361,30 @@ test("a removal with uninstall while an install signed with the key is pending d
   assert.deepEqual(marks(env), []);
 });
 
-test("a removal with uninstall during the hand-off's download keeps the key, and the failed download releases it", async () => {
+// (op lock) A removal started during the hand-off's download waits for the
+// hand-off; after the failed download nothing holds the key, so it goes at once.
+test("a removal with uninstall started during the hand-off's download runs after it; after the failed download the key goes at once", async () => {
   const key = newPkcs8();
   const env = await trackedWithKey(key);
-  let keptDuring = null;
+  let removal = null;
+  let trackedDuring = null;
   env.onDownloadStarted = async (downloadId) => {
     env.onDownloadStarted = null;
-    await removeRepo(K, true);
-    keptDuring = env.store["key:" + K];
+    removal = removeRepo(K, true);
+    await sleep(10);
+    trackedDuring = !!env.store["repo:" + K];
     env.files.get(downloadId).state = "interrupted";
   };
   await assert.rejects(installRelease(K), /interrupted/);
-  assert.equal(keptDuring, key, "kept while the hand-off was in flight");
-  assert.equal(env.store["key:" + K], undefined, "deleted when the hand-off failed");
+  await removal;
+  assert.equal(trackedDuring, true, "the removal waited for the hand-off");
+  assert.equal(env.store["key:" + K], undefined, "deleted after the hand-off failed");
   assert.deepEqual(marks(env), []);
 });
 
-// A removal with uninstall that completes while an install downloads its asset
-// leaves no key behind: the install must not create a new key for the removed repo.
-test("an install whose repo is removed with uninstall during the asset download stores no new key", async () => {
+// (op lock) A removal started while an install downloads its asset runs after
+// the hand-off, so the handed-off CRX's key stays for its prompt.
+test("a removal with uninstall started during an install's asset download runs after the hand-off and keeps the key for its prompt", async () => {
   const key = newPkcs8();
   const env = await trackedWithKey(key);
   const { promise: entered, resolve: enter } = Promise.withResolvers();
@@ -384,11 +396,17 @@ test("an install whose repo is removed with uninstall during the asset download 
   };
   const install = installRelease(K);
   await entered;
-  await removeRepo(K, true);
+  const removal = removeRepo(K, true);
+  await sleep(10);
+  assert.ok(await opWaiting(), "the removal waits for the install");
   release();
-  await assert.rejects(install, /no longer tracked/);
+  await install;
+  await removal;
+  assert.equal(env.handedOff.length, 1);
+  assert.equal(env.store["key:" + K], key, "held by the handed-off install");
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
   assert.equal(env.store["key:" + K], undefined);
-  assert.equal(env.handedOff.length, 0);
+  assert.deepEqual(marks(env), []);
 });
 
 // Model: an install runs while a removal with uninstall and an export start at
@@ -501,47 +519,56 @@ test("a file key that the backup also holds as a repo key is imported only as th
 
 // ---- Round 3 F1: a key hold lasts while the install is in flight ----
 // (owner decision) The hold starts its PENDING_GRACE_MS prompt clock only when
-// the hand-off download completes; the key is exported while held.
+// the hand-off download completes; the key is exported while held. With the
+// op lock, a removal can only come between when the hand-off's page went away
+// (the browser then releases its lock: env.locks.abandon).
 
-test("a removal with uninstall keeps the key past the grace period while the hand-off download is in progress, then for the grace period after it completes", async () => {
+test("after the hand-off's page went away mid-download, a removal keeps the key while the download is in progress, then for the grace period after it completed", async () => {
   const key = newPkcs8();
   const env = await trackedWithKey(key);
   env.newDownloadState = "in_progress";
   const { promise: started, resolve } = Promise.withResolvers();
   env.onDownloadStarted = async () => resolve();
-  const installing = installRelease(K);
+  installRelease(K); // its page goes away below; it never ends
   await started;
-  while (!env.changedListeners.size) await new Promise((r) => setTimeout(r, 1));
+  while (!env.changedListeners.size) await sleep(1);
+  env.locks.abandon("extainium-op");
   await removeRepo(K, true);
-  await sweepDownloads(Date.now() + 10 * PENDING_GRACE_MS);
+  const t0 = Date.now() + 10 * PENDING_GRACE_MS;
+  await sweepDownloads(t0);
   assert.equal(env.store["key:" + K], key, "held while the download is in progress");
   assert.equal(JSON.parse(await exportBackup()).keys[K], key, "exported while held");
   assert.deepEqual(env.cancelled, [], "the download is not cancelled");
-  env.files.get(1).state = "complete";
-  env.emitChanged({ id: 1, state: { previous: "in_progress", current: "complete" } });
-  await installing;
-  await sweepDownloads(Date.now() + PENDING_GRACE_MS - 5000);
+  env.files.get(1).state = "complete"; // no event: the page that listened is gone
+  await sweepDownloads(t0 + 1000);
+  await sweepDownloads(t0 + 1000 + PENDING_GRACE_MS - 5000);
   assert.equal(env.store["key:" + K], key, "held within the grace period after the download completed");
-  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  await sweepDownloads(t0 + 1000 + PENDING_GRACE_MS);
   assert.equal(env.store["key:" + K], undefined, "deleted once the prompt expired");
   assert.deepEqual(marks(env), []);
 });
 
-test("a removal with uninstall keeps the key past the grace period while the hand-off waits for its download ID", async () => {
+// F1 (closure review, owner decision): an entry that never got a download ID
+// after its page went away is failed after NO_DOWNLOAD_ID_MS (its blob URL
+// died with the page), and only then releases the key.
+test("after the hand-off's page went away before the download ID, a removal keeps the key for NO_DOWNLOAD_ID_MS, then the entry fails and the key goes", async () => {
   const key = newPkcs8();
   const env = await trackedWithKey(key);
   const { promise: started, resolve } = Promise.withResolvers();
-  const { promise: gate, resolve: release } = Promise.withResolvers();
-  env.onDownloadStarted = async () => { resolve(); await gate; };
-  const installing = installRelease(K);
+  env.onDownloadStarted = async () => { resolve(); await new Promise(() => {}); }; // download() never returns
+  installRelease(K);
   await started;
+  env.locks.abandon("extainium-op");
   await removeRepo(K, true);
-  await sweepDownloads(Date.now() + 10 * PENDING_GRACE_MS);
-  assert.equal(env.store["key:" + K], key, "held while the download ID is not known");
-  release();
-  await installing;
-  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
-  assert.equal(env.store["key:" + K], undefined);
+  const [entry] = Object.values(env.store).filter((v) => v && v.token);
+  assert.equal(entry.downloadId, null);
+  await sweepDownloads(entry.at + NO_DOWNLOAD_ID_MS - 1000);
+  assert.equal(env.store["key:" + K], key, "held while the download may still start");
+  assert.ok(env.store["install:" + entry.token], "the entry is kept");
+  await sweepDownloads(entry.at + NO_DOWNLOAD_ID_MS);
+  assert.equal(env.store["key:" + K], undefined, "released once the entry failed");
+  assert.equal(env.store["install:" + entry.token], undefined, "the entry is gone");
+  assert.deepEqual(marks(env), []);
 });
 
 // A hand-off whose page closed during the download never learns that it
@@ -586,9 +613,10 @@ test("tracking a file install whose first check fails keeps the file key selecta
   assert.deepEqual({ repoKey: entry.repoKey, version: entry.version, signedWith: entry.signedWith }, { repoKey: null, version: "1.0", signedWith: null }, "the pending file install is as before");
 });
 
-// F4 repro: an install with a selected file key read the key before tracking
-// moved it to a repo, and its hand-off wrote it back as a file key.
-test("an install with a file key that tracking moved meanwhile is refused and does not bring the file key back", async () => {
+// F4 repro, with the op lock: a track started while an install reads its
+// selected file key runs after that install; the key then lives only in the
+// repo, held by the pending install.
+test("a track started during an install with a file key runs after it; the key moves to the repo and the pending install holds it", async () => {
   const env = fakeChrome();
   fakeGithub([zipRelease("v1")]);
   const f = await installedFromFile(env);
@@ -603,13 +631,17 @@ test("an install with a file key that tracking moved meanwhile is refused and do
   };
   const second = installFile(zip, "local.zip", "file:" + f.extensionId);
   await started;
-  await trackInstalledFile(K, { ...f, keyPkcs8: null });
+  const tracking = trackInstalledFile(K, { ...f, keyPkcs8: null });
+  await sleep(10);
+  assert.equal(env.store["repo:" + K], undefined, "the track waits for the install");
   release();
-  await assert.rejects(second, new RegExp(`install local\\.zip: the file key of extension ${f.extensionId} is no longer stored`));
-  assert.equal(env.store["filekey:" + f.extensionId], undefined, "not written back");
+  await second;
+  await tracking;
+  assert.equal(env.store["filekey:" + f.extensionId], undefined, "not a file key any more");
   assert.equal(env.store["key:" + K], f.keyPkcs8);
-  assert.equal(env.handedOff.length, 1, "only the first install was handed off");
+  assert.equal(env.handedOff.length, 2);
   await removeRepo(K, true);
+  assert.equal(env.store["key:" + K], f.keyPkcs8, "held by the pending second install");
   await sweepDownloads(Date.now() + PENDING_GRACE_MS);
   assert.equal(env.store["key:" + K], undefined);
   assert.equal(env.store["filekey:" + f.extensionId], undefined, "the deleted key survives nowhere");
@@ -648,7 +680,7 @@ test("property: interleaved track/file-key install/remove keep the file key in e
           if (!/already tracked|HTTP 404|not tracked/.test(e.message)) throw e;
         }),
         install: () => installFile(zip, "local.zip", "file:" + f.extensionId).catch((e) => {
-          if (!/is no longer stored|no file key is stored/.test(e.message)) throw e;
+          if (!/no file key is stored/.test(e.message)) throw e;
         }),
         remove: () => removeRepo(K, true).then(() => { removed = true; }, (e) => {
           if (!/not tracked/.test(e.message)) throw e;
@@ -660,11 +692,13 @@ test("property: interleaved track/file-key install/remove keep the file key in e
       for (const r of results) if (r.status === "rejected") throw r.reason;
       const places = () => ({ file: env.store["filekey:" + f.extensionId] === k, repo: env.store["key:" + K] === k });
       assert.ok(!(places().file && places().repo), "never both a file key and a repo key");
-      if (env.store["repo:" + K]) assert.ok(places().repo, "a tracked repo holds the moved key");
+      // (After a removal with uninstall the key is gone for good; tracking again finds none.)
+      if (env.store["repo:" + K] && !removed) assert.ok(places().repo, "a tracked repo holds the moved key");
       else if (!removed) assert.ok(places().file, "untracked and not removed: still a selectable file key");
       for (const crx of env.handedOff) assert.equal(await extensionIdFromCrx(crx), f.extensionId);
       await sweepDownloads(Date.now() + PENDING_GRACE_MS);
-      if (removed) assert.deepEqual(places(), { file: false, repo: false }, "removed with uninstall: the key survives nowhere");
+      // (A repo tracked again while the key was still held keeps it, by design.)
+      if (removed && !env.store["repo:" + K]) assert.deepEqual(places(), { file: false, repo: false }, "removed with uninstall: the key survives nowhere");
     }),
     { numRuns: 60 }
   );

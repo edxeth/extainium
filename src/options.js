@@ -1,9 +1,9 @@
 import {
-  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, fileKeysView,
-  importBackup, installFile, installRelease, refreshBadge, removeRepo, saveBackup, setPrereleases, setTemplate,
-  trackInstalledFile, trackedView,
+  PENDING_GRACE_MS, addRepo, checkAll, checkRepo, chooseAsset, confirmIdentityChange, fileKeysView, forgetFileKey,
+  importBackup, installFile, installRelease, isPromptWaiting, refreshBadge, removeRepo, saveBackup, setGithubToken,
+  setPrereleases, setTemplate, trackInstalledFile, trackedView, whenQueued,
 } from "./lib/manager.js";
-import { getRepo, getSettings, setSettings } from "./lib/store.js";
+import { getRepo, getSettings } from "./lib/store.js";
 import { isPackageAsset, matchAssets } from "./lib/releases.js";
 import { friendly } from "./friendly.js";
 import { setTheme, startTheme } from "./theme.js";
@@ -124,10 +124,16 @@ function ctlOf(el) {
   return card && el.dataset.ctl ? { key: card.dataset.key, ctl: el.dataset.ctl } : null;
 }
 
+// Operations run one at a time across Extainium (this page, another page, the
+// background check). An action whose operation has to wait says so where its
+// result will show, until it runs.
+const WAITING = "Waiting for another action…";
+
 // Runs a UI action: marks the button busy, reports its result where it belongs, re-renders.
 // where: the id of an inline status line, { card: key } for a card's own error line, or
 // omitted for the header strip. A card action's result text goes to the strip (its card
-// may be gone, e.g. after Remove).
+// may be gone, e.g. after Remove). fn(wait) starts its operation synchronously, or, after
+// an await, through whenQueued(wait, () => operation(...)), so a wait is shown.
 async function act(button, fn, where) {
   if (button) setBusy(button, true);
   focusMemo = ctlOf(button || document.activeElement);
@@ -137,8 +143,23 @@ async function act(button, fn, where) {
   else if (cardKey) clearCardError(cardKey);
   else showMessage("");
   $("pickerError").replaceChildren();
+  if (inline === "fileStatus") watchFileInstall(null);
+  const wait = () => {
+    if (inline) say(inline, WAITING);
+    else if (cardKey) {
+      cardStatus.set(cardKey, { busy: true, text: WAITING });
+      render();
+    } else showMessage(WAITING);
+    return () => {
+      if (inline) say(inline, "");
+      else if (cardKey) {
+        cardStatus.delete(cardKey);
+        render();
+      } else showMessage("");
+    };
+  };
   try {
-    const msg = await fn();
+    const msg = await whenQueued(wait, () => fn(wait));
     if (msg && inline) say(inline, msg);
     else if (msg) showMessage(msg);
   } catch (e) {
@@ -190,8 +211,12 @@ async function cardAct(key, fn, retry) {
     render();
   };
   set({ busy: true, text: "Working…" });
+  const wait = () => {
+    set({ busy: true, text: WAITING });
+    return () => set({ busy: true, text: "Working…" });
+  };
   try {
-    const text = await fn((step) => set({ busy: true, text: step }));
+    const text = await whenQueued(wait, () => fn((step) => set({ busy: true, text: step })));
     if (text) set({ text });
     else cardStatus.delete(key);
   } catch (e) {
@@ -333,10 +358,10 @@ function identityNotice(key, change, title) {
 }
 
 // Install handed to the browser and not confirmed yet. After the grace period
-// the prompt was most likely dismissed; the entry stays until the lib forgets it.
-const isWaiting = (pending) => Date.now() - pending.at < PENDING_GRACE_MS;
+// from its prompt (the lib's clock, isPromptWaiting) the prompt was most likely
+// dismissed; the entry stays until the lib forgets it.
 function pendingLine(pending) {
-  if (isWaiting(pending)) {
+  if (isPromptWaiting(pending)) {
     return h("p", { className: "card-status" }, h("span", { className: "spinner", "aria-hidden": "true" }),
       `Waiting for the browser to confirm ${pending.version}…`);
   }
@@ -557,11 +582,12 @@ function render() {
 let graceTimer = 0;
 let rateTimer = 0;
 
+// (A download still in progress has no prompt time yet; its completion is a storage change.)
 function scheduleGrace(view) {
   clearTimeout(graceTimer);
   const due = view
-    .filter((v) => v.pendingInstall && isWaiting(v.pendingInstall))
-    .map((v) => v.pendingInstall.at + PENDING_GRACE_MS - Date.now());
+    .filter((v) => v.pendingInstall && v.pendingInstall.promptAt !== null && isPromptWaiting(v.pendingInstall))
+    .map((v) => v.pendingInstall.promptAt + PENDING_GRACE_MS - Date.now());
   if (due.length) graceTimer = setTimeout(render, Math.max(0, Math.min(...due)) + 50);
 }
 
@@ -600,7 +626,9 @@ async function renderNow() {
   const updates = view.filter((v) => v.state === "update").length;
   $("updateCount").hidden = !updates;
   $("updateCount").textContent = plural(updates, "update", "updates");
-  renderKeyChoice(view, await fileKeysView());
+  const fileKeys = await fileKeysView();
+  renderKeyChoice(view, fileKeys);
+  renderFileKeys(fileKeys);
   const { lastCheck, rateLimit } = await chrome.storage.local.get(["lastCheck", "rateLimit"]);
   $("checkInfo").textContent = lastCheck
     ? `Last checked ${new Date(lastCheck.at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}${lastCheck.errors.length ? ` · ${plural(lastCheck.errors.length, "error", "errors")}` : ""}`
@@ -646,24 +674,91 @@ $("addForm").addEventListener("submit", (e) => {
   }, "addStatus");
 });
 
+// The install from a file waiting at the browser's prompt: { id, version, name, timer },
+// or null. Its status line follows the prompt as the cards do: added on the browser's
+// confirmation, not confirmed once the grace period after the prompt passed.
+let fileWatch = null;
+function watchFileInstall(next) {
+  if (fileWatch) clearTimeout(fileWatch.timer);
+  fileWatch = next;
+}
+function fileInstallAdded(info) {
+  if (!fileWatch || info.id !== fileWatch.id || info.version !== fileWatch.version) return;
+  say("fileStatus", `${fileWatch.name} ${fileWatch.version} added.`);
+  watchFileInstall(null);
+}
+
 let fileResult = null;
 $("fileInstall").addEventListener("click", (e) =>
-  act(e.currentTarget, async () => {
+  act(e.currentTarget, async (wait) => {
     const file = $("fileInput").files[0];
     if (!file) {
       say("fileStatus", "Choose a .crx or .zip file first.", true);
       return;
     }
     const signWith = $("fileKey").value || null;
-    const res = await installFile(new Uint8Array(await file.arrayBuffer()), file.name, signWith);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const res = await whenQueued(wait, () => installFile(bytes, file.name, signWith));
     // A zip installed without a repo keeps its key in the file-key store; tracking takes it
     // from there, so the page does not hold on to the private key.
     fileResult = res.repoKey ? res : { ...res, keyPkcs8: null };
     $("fileTrack").hidden = !!res.repoKey; // a CRX is never attached to the selected repo
     $("fileResult").textContent = `${res.name} ${res.installed.version} → ID ${res.extensionId}.`;
+    const name = res.name || file.name;
+    if (res.confirmed) return `${name} ${res.installed.version} added.`;
+    const pending = { promptAt: res.promptAt };
+    watchFileInstall({
+      id: res.extensionId, version: res.installed.version, name,
+      timer: setTimeout(() => {
+        if (!isPromptWaiting(pending)) say("fileStatus", `The browser has not confirmed ${name} ${res.installed.version}. If you dismissed the prompt, install again.`);
+        watchFileInstall(null);
+      }, Math.max(0, res.promptAt + PENDING_GRACE_MS - Date.now()) + 50),
+    });
     return "Confirm the browser prompt to add the extension.";
   }, "fileStatus")
 );
+
+// Kept file keys with Forget. Deleting a key cannot be undone: a second tap confirms.
+const forgetArmed = new Map(); // extension ID -> timer
+function renderFileKeys(fileKeys) {
+  const refocus = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.forget;
+  for (const id of forgetArmed.keys()) if (!fileKeys.some((f) => f.extensionId === id)) disarmForget(id);
+  $("fileKeys").hidden = !fileKeys.length;
+  $("fileKeyList").replaceChildren(...fileKeys.map((f) => {
+    const title = f.name ? `${f.name} ${f.version}` : "Not installed";
+    const label = () => (forgetArmed.has(f.extensionId) ? "Tap again to delete the key" : "Forget");
+    const button = h("button", {
+      className: "btn danger", "data-forget": f.extensionId, "aria-label": `${label()}, ${title}, ${f.extensionId}`,
+      onclick: (e) => {
+        if (!forgetArmed.has(f.extensionId)) {
+          forgetArmed.set(f.extensionId, setTimeout(() => {
+            disarmForget(f.extensionId);
+            render();
+          }, ARM_MS));
+          button.textContent = label();
+          button.setAttribute("aria-label", `${label()}, ${title}, ${f.extensionId}`);
+          announce("Tap again to delete the key.");
+          return;
+        }
+        disarmForget(f.extensionId);
+        announce("");
+        act(e.currentTarget, async () => {
+          await forgetFileKey(f.extensionId);
+          return `Forgot the key of ${f.name || f.extensionId}.`;
+        }, "keysStatus");
+      },
+    }, label());
+    return h("li", {}, h("span", { className: "key-name" }, title, h("span", { className: "meta" }, f.extensionId)), button);
+  }));
+  if (refocus) {
+    const again = $("fileKeyList").querySelector(`[data-forget="${CSS.escape(refocus)}"]`);
+    if (again && document.activeElement !== again) again.focus({ preventScroll: true });
+  }
+}
+function disarmForget(id) {
+  clearTimeout(forgetArmed.get(id));
+  forgetArmed.delete(id);
+}
 
 $("fileTrackForm").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -684,7 +779,7 @@ $("theme").addEventListener("change", (e) => act(null, () => setTheme(e.target.v
 $("tokenForm").addEventListener("submit", (e) => {
   e.preventDefault();
   act(e.submitter, async () => {
-    await setSettings({ githubToken: $("token").value.trim() });
+    await setGithubToken($("token").value.trim());
     return "Token saved.";
   }, "tokenStatus");
 });
@@ -704,12 +799,13 @@ $("export").addEventListener("click", (e) =>
 );
 $("import").addEventListener("click", () => $("importInput").click());
 $("importInput").addEventListener("change", (e) =>
-  act(null, async () => {
+  act(null, async (wait) => {
     const file = e.target.files[0];
     e.target.value = "";
     if (!file) return;
     $("importResult").replaceChildren();
-    const res = await importBackup(await file.text());
+    const text = await file.text();
+    const res = await whenQueued(wait, () => importBackup(text));
     await showImportResult(res); // shown under the Import button
   }, "backupStatus")
 );
@@ -746,7 +842,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const typing = document.activeElement && document.activeElement.matches("#list input[type=text]");
   if (!typing) render();
 });
-chrome.management.onInstalled.addListener(() => render());
+chrome.management.onInstalled.addListener((info) => {
+  fileInstallAdded(info);
+  render();
+});
 chrome.management.onUninstalled.addListener(() => render());
 
 render();

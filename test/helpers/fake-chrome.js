@@ -2,13 +2,17 @@
 // Storage values are cloned on every read and write, as chrome.storage does.
 
 import { createHash } from "node:crypto";
+import { installFakeLocks } from "./fake-locks.js";
 
 const clone = (v) => structuredClone(v);
 const nativeFetch = globalThis.fetch;
 
 // hooks: { beforeSet(obj), beforeGet(keys) } may return a promise to delay the call.
+// Each call also installs fresh Web Locks (env.locks, see fake-locks.js), so a
+// lock a test left held never blocks the next test.
 export function fakeChrome({ extensions = [], hooks = {} } = {}) {
   const env = {
+    locks: installFakeLocks(),
     store: {},
     extensions: extensions.map(clone),
     files: new Map(), // downloadId -> { filename, bytes, state: "in_progress"|"complete"|"interrupted", exists }

@@ -1,8 +1,13 @@
 // Operations behind the UI and the background worker. Runs in extension pages
 // and the service worker; installs (blob URLs) only work in pages.
-// Every read-modify-write of stored state runs under withStateLock (store.js);
-// network and crypto work happens outside the lock, and its result is
-// committed under the lock against a fresh read.
+// Every exported operation that changes state runs as a whole, one at a time
+// across all contexts, under the operation lock (operation(), withOpLock in
+// store.js), including its network calls and a hand-off's download up to its
+// completion. Inside an operation, code calls internal functions (…Now),
+// never an exported operation: the lock is not re-entrant. The event handlers
+// (handleExtensionInstalled, sweepDownloads) do not take it and must be
+// correct while an operation runs. Every read-modify-write of stored state,
+// in operations and handlers, runs under the short withStateLock.
 
 import {
   base64Decode, base64Encode, extensionIdFromCrx, extensionIdFromSpki,
@@ -17,7 +22,8 @@ import {
   INSTALL_PREFIX, findRepo, getFileKey, getRepo, getSettings, getSigningKey, listFileKeys, listInstalls,
   listKeyDeletions, listRepos, listSigningKeys, makeBackup, markKeyForDeletion, migrateStorage, newRecord,
   parseBackup, patchRepo, putFileKeyIfAbsent, putInstall, putRepo, putSigningKeyIfAbsent, removeFileKey,
-  removeInstall, removeKeyDeletion, removeRepoRecord, removeSigningKey, repoKey, updateRepo, withStateLock,
+  removeInstall, removeKeyDeletion, removeRepoRecord, removeSigningKey, repoKey, setSettings, updateRepo, withOpLock,
+  withStateLock,
 } from "./store.js";
 import { installCrx } from "./install.js";
 
@@ -31,6 +37,33 @@ function ready() {
   return migrated;
 }
 
+// The UI's wait notice for the next operation started (whenQueued).
+let waitNotice = null;
+
+// An exported operation: fn(...args) runs under the operation lock.
+function operation(fn) {
+  return (...args) => {
+    const onWait = waitNotice;
+    waitNotice = null;
+    return withOpLock(async () => {
+      await ready();
+      return fn(...args);
+    }, onWait);
+  };
+}
+
+// Calls call(), which must start one operation synchronously; when that
+// operation has to wait for another one (in any context), onWait() is called
+// first, and a function it returns once the operation runs. Returns call()'s result.
+export function whenQueued(onWait, call) {
+  waitNotice = onWait;
+  try {
+    return call();
+  } finally {
+    waitNotice = null;
+  }
+}
+
 async function installedExtensions() {
   const all = await chrome.management.getAll();
   return new Map(all.map((e) => [e.id, e]));
@@ -42,8 +75,10 @@ async function idOfKey(pkcs8) {
 
 // [{ key, record, latest, ext, state, hasKey, pendingInstall }] for the UI and the badge.
 // state: updateState's states, or "identity-change" while record.identityChange
-// waits for confirmIdentityChange. pendingInstall: { version, tag, at } of a CRX
-// handed to the browser whose install was not confirmed yet, or null.
+// waits for confirmIdentityChange. pendingInstall: { version, tag, promptAt } of
+// a CRX handed to the browser whose install was not confirmed yet, or null;
+// promptAt is when its "Add extension?" prompt appeared (its download
+// completed), null while it is still downloading (see isPromptWaiting).
 export async function trackedView() {
   await ready();
   const [records, exts, keys, installs] = await Promise.all([listRepos(), installedExtensions(), listSigningKeys(), listInstalls()]);
@@ -58,9 +93,18 @@ export async function trackedView() {
     return {
       key, record, latest, ext, state,
       hasKey: key in keys,
-      pendingInstall: pending ? { version: pending.version, tag: pending.installed && pending.installed.tag, at: pending.at } : null,
+      pendingInstall: pending
+        ? { version: pending.version, tag: pending.installed && pending.installed.tag, promptAt: pending.downloadDone ? promptTime(pending) : null }
+        : null,
     };
   });
+}
+
+// True while a pending install ({ promptAt }, as in trackedView) may still be
+// confirmed at the browser's prompt: still downloading, or within
+// PENDING_GRACE_MS of its prompt, the clock the key holds and cleanup use.
+export function isPromptWaiting(pending, now = Date.now()) {
+  return pending.promptAt === null || now - pending.promptAt < PENDING_GRACE_MS;
 }
 
 // The badge background: the UI accent, --accent in style.css (light scheme,
@@ -108,16 +152,19 @@ const criteriaOf = (r) => ({ template: r.template, includePrereleases: r.include
 const sameCriteria = (a, b) => !!a && !!b && a.template === b.template && a.includePrereleases === b.includePrereleases;
 // A full API check is due at least this often, whatever the feed shows.
 export const FULL_CHECK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const newestOf = (feed) => Math.max(0, ...feed.map((e) => Date.parse(e.updated)));
+// The stored form of a feed: every entry's id and updated time, in feed order.
+const feedSnapshot = (feed) => ({ entries: feed.map((e) => [e.id, e.updated]) });
+const sameSnapshot = (a, b) => !!a && !!b && Array.isArray(a.entries) && JSON.stringify(a.entries) === JSON.stringify(b.entries);
 // The tag of a feed entry: GitHub's ids are tag:github.com,2008:Repository/<repo id>/<tag>.
 const feedTag = (id) => (/^tag:github\.com,2008:Repository\/\d+\/(.+)$/.exec(id) || [])[1] ?? null;
 
 // True when the feed shows that the API would select what the cache selects:
-// the release selected last time is in the feed with the updated time the API
-// reported for it, and no feed entry is newer than the newest one the last
-// full check saw. Also requires a cache, unchanged selection criteria and a
-// full check within FULL_CHECK_MAX_AGE_MS. (The feed holds only the newest 10
-// releases and tags; a selected release outside it always needs the API.)
+// the feed is exactly the one the last full check saw (every entry's id and
+// updated time; any added, removed or changed entry needs the API), and the
+// release selected last time is in it with the updated time the API reported
+// for it. Also requires a cache, unchanged selection criteria and a full check
+// within FULL_CHECK_MAX_AGE_MS. (The feed holds only the newest 10 releases
+// and tags; a selected release outside it always needs the API.)
 function feedCovers(record, feed, now) {
   if (!feed || !record.feed || !record.releases || !record.pages) return false;
   if (!sameCriteria(record.checkedCriteria, criteriaOf(record))) return false;
@@ -127,15 +174,16 @@ function feedCovers(record, feed, now) {
   const entry = feed.find((e) => feedTag(e.id) === latest.tag);
   const updated = Date.parse(latest.release.updatedAt);
   if (!entry || Number.isNaN(updated) || Date.parse(entry.updated) !== updated) return false;
-  return newestOf(feed) <= record.feed.newest;
+  return sameSnapshot(feedSnapshot(feed), record.feed);
 }
 
 // Checks a repo for new releases. The releases API (rate-limited) is called
 // unless the repo's releases.atom feed (not rate-limited) covers the release
 // selected last time (feedCovers). The feed is read before the API, so a
 // release published in between shows as a newer entry next time.
-export async function checkRepo(key) {
-  await ready();
+export const checkRepo = operation(checkRepoNow);
+
+async function checkRepoNow(key) {
   const record = await getRepo(key);
   const { githubToken } = await getSettings();
   const checkedAt = Date.now();
@@ -156,7 +204,7 @@ export async function checkRepo(key) {
   return patchRepo(key, {
     releases: res.releases,
     pages: res.pages.map(({ releases, ...p }) => ({ ...p, count: releases.length })),
-    feed: feed && { newest: newestOf(feed) },
+    feed: feed && feedSnapshot(feed),
     checkedCriteria: criteriaOf(record),
     fullCheckAt: checkedAt,
     error: null,
@@ -165,12 +213,13 @@ export async function checkRepo(key) {
 }
 
 // Checks every repo; one failure does not stop the others. Returns { updates, errors }.
-export async function checkAll() {
-  await ready();
+export const checkAll = operation(checkAllNow);
+
+async function checkAllNow() {
   const errors = [];
   for (const r of await listRepos()) {
     try {
-      await checkRepo(repoKey(r));
+      await checkRepoNow(repoKey(r));
     } catch (e) {
       errors.push(e.message);
     }
@@ -180,31 +229,24 @@ export async function checkAll() {
   return { updates, errors };
 }
 
-export async function addRepo(input) {
-  await ready();
+export const addRepo = operation(async (input) => {
   const { owner, repo } = parseRepo(input);
   const key = repoKey({ owner, repo });
-  const created = await withStateLock(async () => {
+  await withStateLock(async () => {
     if (await findRepo(key)) throw new Error(`add repo: ${key} is already tracked`);
-    const record = newRecord(owner, repo);
-    await putRepo(record);
-    return record;
+    await putRepo(newRecord(owner, repo));
   });
-  await checkNewRepo(key, created);
+  await checkNewRepo(key);
   return key;
-}
+});
 
 // First check of a record just created; when it fails, the record is removed
-// again unless another operation (e.g. an import) changed it meanwhile.
-// undo: run in the same locked step after such a removal.
-async function checkNewRepo(key, created, undo = null) {
+// again, and undo() runs in the same locked step.
+async function checkNewRepo(key, undo = null) {
   try {
-    await checkRepo(key);
+    await checkRepoNow(key);
   } catch (e) {
     await withStateLock(async () => {
-      const r = await findRepo(key);
-      const untouched = r && ["addedAt", "template", "includePrereleases", "extensionId"].every((f) => r[f] === created[f]);
-      if (!untouched) return;
       await removeRepoRecord(key);
       if (undo) await undo();
     });
@@ -212,17 +254,12 @@ async function checkNewRepo(key, created, undo = null) {
   }
 }
 
-// The repo's signing key; a new one is generated and stored on first use,
-// only while the repo is tracked (a removal may have deleted its key).
-// When two contexts race, the first stored key wins and both use it.
+// The repo's signing key; a new one is generated and stored on first use.
 async function ensureSigningKey(key) {
   const existing = await getSigningKey(key);
   if (existing) return existing;
   const fresh = base64Encode((await generateSigningKey()).pkcs8);
-  return withStateLock(async () => {
-    if (!(await findRepo(key))) throw new Error(`sign ${key}: the repo is no longer tracked`);
-    return putSigningKeyIfAbsent(key, fresh);
-  });
+  return withStateLock(() => putSigningKeyIfAbsent(key, fresh));
 }
 
 // Links the record to the extension ID its current asset installs as: the
@@ -240,39 +277,27 @@ async function linkNow(key) {
   const latest = latestFor(record);
   if (!latest || !latest.asset) return record;
   const isCrxAsset = /\.crx$/i.test(latest.asset.name);
-  const signingKey = isCrxAsset ? null : await ensureSigningKey(key);
-  const newId = isCrxAsset ? await extensionIdFromCrx(await downloadAssetHead(latest.asset)) : await idOfKey(signingKey);
+  const newId = isCrxAsset ? await extensionIdFromCrx(await downloadAssetHead(latest.asset)) : await idOfKey(await ensureSigningKey(key));
   const exts = await installedExtensions();
-  return withStateLock(async () => {
-    const r = await getRepo(key);
-    const now = latestFor(r);
-    // Changed meanwhile: the change that did it links again.
-    if (!now || !now.asset || now.asset.url !== latest.asset.url) return r;
-    if (signingKey && (await getSigningKey(key)) !== signingKey) {
-      throw new Error(`link ${key}: its signing key was replaced meanwhile; try again`);
-    }
-    const next = r.extensionId && r.extensionId !== newId && exts.has(r.extensionId)
-      ? { ...r, identityChange: { from: r.extensionId, to: newId, tag: now.tag, asset: now.asset.name } }
-      : { ...r, extensionId: newId, identityChange: null };
-    await putRepo(next);
-    return next;
-  });
+  return updateRepo(key, (r) => (r.extensionId && r.extensionId !== newId && exts.has(r.extensionId)
+    ? { ...r, identityChange: { from: r.extensionId, to: newId, tag: latest.tag, asset: latest.asset.name } }
+    : { ...r, extensionId: newId, identityChange: null }));
 }
 
 // Accepts a pending identity change: the repo now tracks the new extension ID.
-export async function confirmIdentityChange(key) {
-  await ready();
+export const confirmIdentityChange = operation(async (key) => {
   const record = await updateRepo(key, (r) => {
     if (!r.identityChange) throw new Error(`confirm identity change of ${key}: no identity change is pending`);
     return { ...r, extensionId: r.identityChange.to, identityChange: null };
   });
   await refreshBadge();
   return record;
-}
+});
 
 // template: asset file name template (releases.js), e.g. "ext-{version}.zip".
-export async function setTemplate(key, template) {
-  await ready();
+export const setTemplate = operation(setTemplateNow);
+
+async function setTemplateNow(key, template) {
   validateTemplate(template);
   // A new template replaces whatever made the old one fail (e.g. a migration error).
   await patchRepo(key, { template, error: null });
@@ -285,20 +310,17 @@ export async function setTemplate(key, template) {
 async function relink(key) {
   const r = await getRepo(key);
   const truncated = r.pages && r.pages.length && r.pages.length < MAX_RELEASE_PAGES && r.pages.at(-1).next;
-  if (r.releases && truncated && !hasEligible(r, r.releases)) await checkRepo(key);
+  if (r.releases && truncated && !hasEligible(r, r.releases)) await checkRepoNow(key);
   return link(key);
 }
 
-export function chooseAsset(key, assetName, tag) {
-  return setTemplate(key, deriveTemplate(assetName, tag));
-}
+export const chooseAsset = operation((key, assetName, tag) => setTemplateNow(key, deriveTemplate(assetName, tag)));
 
-export async function setPrereleases(key, includePrereleases) {
-  await ready();
+export const setPrereleases = operation(async (key, includePrereleases) => {
   if (typeof includePrereleases !== "boolean") throw new Error(`set pre-releases of ${key}: not true/false: ${includePrereleases}`);
   await patchRepo(key, { includePrereleases });
   return relink(key);
-}
+});
 
 // ---- Hand-off to the browser and download cleanup ----
 // Each CRX handed to the browser gets an "install:<token>" entry:
@@ -314,14 +336,25 @@ export async function setPrereleases(key, includePrereleases) {
 // superseded); a key removeRepo marked for deletion stays until no entry holds
 // it (holdsKey): while the install is in flight (no download ID yet, or
 // downloading), and then PENDING_GRACE_MS from promptAt.
+// A hand-off runs inside its operation up to its download's completion, so the
+// next hand-off starts only after that: hand-offs, their superseding and the
+// attribution of install events are sequential. An entry stays in flight
+// after its operation only when its page went away meanwhile (the browser then
+// releases the operation lock). With a download ID, the sweep reads the
+// download's end from the browser. Without one, the CRX's blob URL died with
+// that page, so no download can start any more: after NO_DOWNLOAD_ID_MS the
+// entry counts as failed and releases its key hold (holdsKey, sweepDownloads).
 // management.onInstalled with the same ID and version confirms an entry: only
 // then is record.installed committed. The event names no build, but
 // Titanium's "Add extension?" prompt is modal, so a new prompt replaces the
 // earlier one: once a hand-off's download completes, it supersedes the earlier
 // prompted, unconfirmed entries of the same ID and version (version null,
 // supersededBy its token), and an event confirms the newest prompted entry
-// (promptOrder). An entry still in flight supersedes nothing yet and is not
-// ended by an event; a hand-off that fails supersedes nothing. The downloaded
+// (promptOrder), or the entry in flight when none was prompted (Chromium may
+// report the install before download() returns). When several are in flight
+// and none was prompted (possible only after a page went away), the event is
+// ambiguous and confirms none. An entry still in flight supersedes nothing yet
+// and is not ended by an event; a hand-off that fails supersedes nothing. The downloaded
 // copy is deleted after the confirmation (superseded copies of that version
 // with it), or PENDING_GRACE_MS after promptAt when the prompt was declined or
 // the install failed, and only once the download has finished. Only downloads
@@ -330,6 +363,10 @@ export const PENDING_GRACE_MS = 2 * 60 * 1000;
 // How long an unconfirmed install may still be confirmed after its copy was deleted.
 export const CONFIRM_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const SWEEP_ALARM = "sweep-downloads";
+// How long an entry without a download ID stays in flight (see above). A live
+// hand-off gets its ID from download() within moments; this only bounds
+// entries whose page went away before that.
+export const NO_DOWNLOAD_ID_MS = 10 * 60 * 1000;
 
 const getInstall = async (token) => (await chrome.storage.local.get(INSTALL_PREFIX + token))[INSTALL_PREFIX + token] || null;
 
@@ -410,9 +447,13 @@ const promptTime = (e) => e.promptAt ?? e.at;
 // entries whose download completed, by promptTime; then those still in flight, newest first.
 const promptOrder = (a, b) => Number(b.downloadDone) - Number(a.downloadDone) || promptTime(b) - promptTime(a);
 
+// True while install entry e is in flight: its download may still complete.
+const inFlight = (e, now) => !e.downloadDone && (e.downloadId !== null || now - e.at < NO_DOWNLOAD_ID_MS);
+
 // True while install entry e may still install a CRX signed with repo k's key:
 // in flight, or within PENDING_GRACE_MS of its prompt.
-const holdsKey = (e, k, now) => e.signedWith === k && !e.confirmedAt && (!e.downloadDone || now - promptTime(e) < PENDING_GRACE_MS);
+const holdsKey = (e, k, now) => e.signedWith === k && !e.confirmedAt
+  && (e.downloadDone ? now - promptTime(e) < PENDING_GRACE_MS : inFlight(e, now));
 
 // Deletes the signing keys removeRepo(key, true) marked once no install entry
 // holds them; inside the lock. A repo tracked again meanwhile keeps its key.
@@ -429,13 +470,13 @@ async function deleteReleasedKeys(now = Date.now()) {
   }
 }
 
-// claim: { key, keyPkcs8, change } for an install of tracked repo key; checked
-// and linked (claimLocked) in the same locked step that records the entry, so
-// no removal of the repo or its key can come between. fileKey: { pkcs8,
-// selected, what } for a zip installed without a repo: a new key is kept in
-// the file-key store; a selected file key must still be stored there (tracking
-// may have moved it to a repo meanwhile). what: the file's name for errors.
-async function handOff(crx, { repoKey: key, extensionId, manifest, installed, claim = null, fileKey = null }) {
+// Inside an operation. claim: { key, keyPkcs8 (the repo key that signed the
+// CRX, or null), change } for an install of tracked repo key; linked (claimLocked) in the same locked step that records
+// the entry. newFileKey: the new key of a zip installed without a repo, kept
+// in the file-key store. Returns { token, promptAt, confirmed } once the
+// download completed: promptAt is when the prompt appeared, confirmed is true
+// when the browser already reported the install.
+async function handOff(crx, { repoKey: key, extensionId, manifest, installed, claim = null, newFileKey = null }) {
   const token = crypto.randomUUID();
   const crxHash = await sha256Hex(crx);
   const exts = claim ? await installedExtensions() : null;
@@ -445,11 +486,7 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
       const changed = await claimLocked(claim, extensionId, exts);
       if (changed) return changed;
     }
-    if (fileKey && fileKey.selected) {
-      if ((await getFileKey(extensionId)) !== fileKey.pkcs8) {
-        throw new Error(`install ${fileKey.what}: the file key of extension ${extensionId} is no longer stored (tracking a repo moves it to that repo); choose the key again`);
-      }
-    } else if (fileKey) await putFileKeyIfAbsent(extensionId, fileKey.pkcs8);
+    if (newFileKey) await putFileKeyIfAbsent(extensionId, newFileKey);
     await putInstall({
       token, repoKey: key, extensionId, version: manifest.version, installed, crxHash,
       signedWith: claim && claim.keyPkcs8 ? claim.key : null, supersededBy: null,
@@ -471,15 +508,15 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
   } catch (e) {
     failure = e;
   }
-  const retry = await withStateLock(async () => {
+  const end = await withStateLock(async () => {
     let e = await getInstall(token);
-    if (!e) return false;
+    if (!e) return null;
     if (failure) {
       e = { ...e, version: null, signedWith: null }; // a failed download installs nothing
       if (e.downloadId === null) await removeInstall(token);
       else await storeInstall(await deleteCopy(e));
       await deleteReleasedKeys();
-      return false;
+      return null;
     }
     const now = Date.now();
     e = { ...e, downloadDone: true, promptAt: e.promptAt ?? now };
@@ -495,18 +532,19 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
     }
     await storeInstall(e, now);
     await deleteReleasedKeys(now);
-    return !!e.confirmedAt && !e.fileGone;
+    return e;
   });
   // Not awaited: the install result does not wait for the cleanup retry.
-  if (retry) retryDeletes([token]).catch((e) => console.error("[Extainium] delete CRX copy:", e));
+  if (end && end.confirmedAt && !end.fileGone) retryDeletes([token]).catch((e) => console.error("[Extainium] delete CRX copy:", e));
   await chrome.alarms.create(SWEEP_ALARM, { delayInMinutes: PENDING_GRACE_MS / 60000 + 0.5 });
   if (failure) throw failure;
-  return token;
+  return { token, promptAt: end ? end.promptAt : null, confirmed: !!(end && end.confirmedAt) };
 }
 
 // management.onInstalled: confirms the pending install of info.id at
-// info.version whose prompt appeared last (promptOrder; one still in flight
-// only when none was prompted) and commits it to its repo record, while that
+// info.version whose prompt appeared last (promptOrder; the one still in
+// flight only when none was prompted, none when several are) and commits it
+// to its repo record, while that
 // record is still linked to info.id (a file install never relinks a repo).
 // Every other prompted or ended unconfirmed entry of that ID and version
 // (superseded, detached, or older ones a previous version left) ends: its
@@ -520,9 +558,11 @@ export async function handleExtensionInstalled(info) {
     const ofVersion = (await listInstalls())
       .filter((e) => e.extensionId === info.id && !e.confirmedAt && e.installed && e.installed.version === info.version)
       .sort(promptOrder);
-    const newest = ofVersion.find((e) => e.version === info.version) || null;
+    const prompted = ofVersion.filter((e) => e.version && e.downloadDone);
+    const flying = ofVersion.filter((e) => e.version && !e.downloadDone && inFlight(e, now));
+    const newest = prompted[0] || (flying.length === 1 ? flying[0] : null);
     for (let e of ofVersion) {
-      if (e !== newest && e.version && !e.downloadDone) continue; // in flight
+      if (e !== newest && flying.includes(e)) continue; // its prompt is yet to come
       if (e === newest) {
         e = { ...e, confirmedAt: now, signedWith: null };
         const record = e.repoKey && (await findRepo(e.repoKey));
@@ -554,9 +594,10 @@ export async function sweepDownloads(now = Date.now()) {
       // A pending install of a repo that is no longer tracked.
       if (e.repoKey && !(await findRepo(e.repoKey))) e = detached(e);
       if (e.downloadId === null) {
-        // The hand-off may still wait for its download ID (onStarted records it);
-        // forgotten only after the confirmation window.
-        if (now - e.at >= CONFIRM_WINDOW_MS) await removeInstall(e.token);
+        // Its hand-off may still wait for its download ID (onStarted records
+        // it); past NO_DOWNLOAD_ID_MS its page went away, so no download can
+        // start (the blob URL died with the page): failed, nothing to delete.
+        if (!inFlight(e, now)) await removeInstall(e.token);
         else await putInstall(e);
         continue;
       }
@@ -600,17 +641,12 @@ function identityError(key, record) {
   return new Error(`install ${key}: ${c.asset}${c.tag ? ` (${c.tag})` : ""} installs as extension ${c.to}, not as the installed ${c.from}; confirm the identity change first`);
 }
 
-// Inside handOff's lock, for an install of tracked repo key: checks that the
-// repo is still tracked and the signing key used (keyPkcs8, null for a CRX)
-// is still the stored one, and links the record to extensionId, unless it is
-// linked to another installed extension (exts): then record.identityChange
-// { from, to: extensionId, ...change } is set and that record returned.
-async function claimLocked({ key, keyPkcs8, change }, extensionId, exts) {
-  const r = await findRepo(key);
-  if (!r) throw new Error(`install ${key}: the repo is no longer tracked`);
-  if (keyPkcs8 && (await getSigningKey(key)) !== keyPkcs8) {
-    throw new Error(`install ${key}: its signing key was replaced meanwhile; try again`);
-  }
+// Inside handOff's lock, for an install of tracked repo key: links the record
+// to extensionId, unless it is linked to another installed extension (exts):
+// then record.identityChange { from, to: extensionId, ...change } is set and
+// that record returned.
+async function claimLocked({ key, change }, extensionId, exts) {
+  const r = await getRepo(key);
   if (r.extensionId && r.extensionId !== extensionId && exts.has(r.extensionId)) {
     const next = { ...r, identityChange: { from: r.extensionId, to: extensionId, ...change } };
     await putRepo(next);
@@ -624,8 +660,7 @@ async function claimLocked({ key, keyPkcs8, change }, extensionId, exts) {
 // Page only. onProgress(text) reports the current step. The install counts
 // once the browser confirms it (handleExtensionInstalled); until then the view
 // shows it as pendingInstall. Returns { extensionId, version, name }.
-export async function installRelease(key, tag, onProgress = () => {}) {
-  await ready();
+export const installRelease = operation(async (key, tag, onProgress = () => {}) => {
   const record = await getRepo(key);
   if (record.identityChange) throw identityError(key, record);
   let release;
@@ -654,7 +689,7 @@ export async function installRelease(key, tag, onProgress = () => {}) {
     claim: { key, keyPkcs8, change: { tag: release.tag, asset: asset.name } },
   });
   return { extensionId, version: manifest.version, name: manifest.name };
-}
+});
 
 // signWith value that picks the file key of an extension: FILE_KEY_CHOICE + ID.
 export const FILE_KEY_CHOICE = "file:";
@@ -668,9 +703,10 @@ export const FILE_KEY_CHOICE = "file:";
 // trackInstalledFile. A CRX carries its author's key and never belongs to a
 // tracked repo: signWith is ignored for it. Page only.
 // Returns { extensionId, keyPkcs8 (key of an install without a repo, or null),
-// installed, name, token, repoKey: the tracked repo the install belongs to, or null }.
-export async function installFile(bytes, filename, signWith) {
-  await ready();
+// installed, name, token, repoKey: the tracked repo the install belongs to, or
+// null, promptAt: when the browser's prompt appeared (as in trackedView's
+// pendingInstall), confirmed: the browser already reported the install }.
+export const installFile = operation(async (bytes, filename, signWith) => {
   const crxFile = isCrx(bytes);
   const fileKeyId = !crxFile && signWith && signWith.startsWith(FILE_KEY_CHOICE) ? signWith.slice(FILE_KEY_CHOICE.length) : null;
   const repo = crxFile || fileKeyId ? null : signWith || null;
@@ -686,13 +722,13 @@ export async function installFile(bytes, filename, signWith) {
   }
   const { crx, extensionId, manifest } = await prepare(bytes, keyPkcs8, filename);
   const installed = { tag: null, digest: null, version: manifest.version };
-  const token = await handOff(crx, {
+  const { token, promptAt, confirmed } = await handOff(crx, {
     repoKey: repo, extensionId, manifest: { ...manifest, name: manifest.name || filename }, installed,
     claim: repo ? { key: repo, keyPkcs8, change: { tag: null, asset: filename } } : null,
-    fileKey: repo || !keyPkcs8 ? null : { pkcs8: keyPkcs8, selected: !!fileKeyId, what: filename },
+    newFileKey: repo || fileKeyId ? null : keyPkcs8,
   });
-  return { extensionId, keyPkcs8: repo ? null : keyPkcs8, installed, name: manifest.name, token, repoKey: repo };
-}
+  return { extensionId, keyPkcs8: repo ? null : keyPkcs8, installed, name: manifest.name, token, repoKey: repo, promptAt, confirmed };
+});
 
 // The file keys (zips installed from a file without a repo), for the sign-with
 // choice of installFile: [{ value (the signWith value), extensionId, name,
@@ -706,17 +742,24 @@ export async function fileKeysView() {
   });
 }
 
+// Deletes the file key of extension extensionId (see fileKeysView). A zip
+// signed for it later gets a new key, so it installs as a different extension.
+export const forgetFileKey = operation((extensionId) => withStateLock(async () => {
+  if (!(await getFileKey(extensionId))) throw new Error(`forget file key: no file key is stored for extension ${extensionId}`);
+  await removeFileKey(extensionId);
+}));
+
 // Starts tracking a repo for an extension installed from a file. The record,
 // the file's signing key (from the file-key store, or fileResult.keyPkcs8)
-// and the link to its ID are decided and written in one locked step, before
-// the network check: a key stored meanwhile (e.g. by an import) is never
-// overruled, and the file's key is never lost. The key moves from the
-// file-key store to the repo; unconfirmed installs signed with it then hold
-// it as the repo's key. When the first check fails and the record is removed
-// again, the key and those installs return to where they were in the same
-// locked step, so the key is never in two places nor lost.
-export async function trackInstalledFile(input, fileResult) {
-  await ready();
+// and the link to its ID are written in one locked step, before the network
+// check: a stored repo key is never overruled, and the file's key is never
+// lost. The key moves from the file-key store to the repo; unconfirmed
+// installs signed with it then hold it as the repo's key. When the first
+// check fails and the record is removed again, the key and those installs
+// return to where they were in the same locked step, so the key is never in
+// two places nor lost: the repo key goes only while it is still the one
+// created here, and the file key comes back only while no repo owns the key.
+export const trackInstalledFile = operation(async (input, fileResult) => {
   const { owner, repo } = parseRepo(input);
   const key = repoKey({ owner, repo });
   const exts = await installedExtensions();
@@ -751,14 +794,13 @@ export async function trackInstalledFile(input, fileResult) {
       attached.push(e);
       await putInstall({ ...e, repoKey: own ? key : e.repoKey, signedWith: fileKey && e.version ? key : null });
     }
-    const record = { ...newRecord(owner, repo), extensionId: id, installed };
-    await putRepo(record);
-    return { record, stored, createdKey, attached };
+    await putRepo({ ...newRecord(owner, repo), extensionId: id, installed });
+    return { stored, createdKey, attached };
   });
-  await checkNewRepo(key, created.record, async () => {
+  await checkNewRepo(key, async () => {
     if (created.createdKey && (await getSigningKey(key)) === created.createdKey) await removeSigningKey(key);
     const back = created.stored || created.createdKey;
-    if (back) await putFileKeyIfAbsent(id, back);
+    if (back && !Object.values(await listSigningKeys()).includes(back)) await putFileKeyIfAbsent(id, back);
     for (const was of created.attached) {
       const e = await getInstall(was.token);
       if (e) await putInstall({ ...e, repoKey: was.repoKey, signedWith: was.signedWith });
@@ -766,7 +808,7 @@ export async function trackInstalledFile(input, fileResult) {
   });
   await refreshBadge();
   return key;
-}
+});
 
 // Stops tracking. The signing key is kept (it re-attaches if the repo is added
 // again and stays in exports) unless uninstall is set: then the extension is
@@ -775,8 +817,7 @@ export async function trackInstalledFile(input, fileResult) {
 // install signed with it remains, else once those are confirmed, superseded,
 // failed or past PENDING_GRACE_MS (handleExtensionInstalled, handOff,
 // sweepDownloads); until then it stays, and is exported.
-export async function removeRepo(key, uninstall) {
-  await ready();
+export const removeRepo = operation(async (key, uninstall) => {
   const record = await getRepo(key);
   if (uninstall && record.extensionId && (await installedExtensions()).has(record.extensionId)) {
     await chrome.management.uninstall(record.extensionId, { showConfirmDialog: true });
@@ -791,14 +832,17 @@ export async function removeRepo(key, uninstall) {
     }
   });
   await refreshBadge();
-}
+});
 
-// Repos and keys are read in one locked snapshot, so a repo is never exported without its key.
-export async function exportBackup() {
-  await ready();
+// Repos and keys are read in one locked snapshot (event handlers may delete a
+// released key meanwhile), so a repo is never exported without its key.
+export const exportBackup = operation(async () => {
   const backup = await withStateLock(async () => makeBackup(await listRepos(), await listSigningKeys(), new Date(), await listFileKeys()));
   return JSON.stringify(backup, null, 2);
-}
+});
+
+// Saves the GitHub token used by checks.
+export const setGithubToken = operation((githubToken) => setSettings({ githubToken }));
 
 // How long saveBackup waits for the end of its download before it reports
 // that the save could not be confirmed (the browser may first ask where to save).
@@ -812,9 +856,11 @@ export const saveTiming = { confirmMs: 2 * 60 * 1000 };
 // arrive before it returns the ID are kept in arrival order and replayed for
 // that ID, and the first end (complete, interrupted or erased) decides. A
 // completed export may be missing from downloads.search on Titanium (seen on
-// the phone; cause not found in Chromium's source), so search only adds an end
-// it already knows. Without any end after saveTiming.confirmMs the result is
-// "not saved" with a "could not confirm" error.
+// the phone; cause not found in Chromium's source), so search is optional: it
+// is not awaited and may only add an end; its failure or stall changes
+// nothing. Without any end after saveTiming.confirmMs the result is "not
+// saved" with a "could not confirm" error. The export is an operation; the
+// save itself is not (the browser's location dialog waits for the user).
 export async function saveBackup(filename) {
   const url = URL.createObjectURL(new Blob([await exportBackup()], { type: "application/json" }));
   let id = null;
@@ -845,8 +891,7 @@ export async function saveBackup(filename) {
       saved: false,
       error: `download #${id}: could not confirm that the backup was saved; no end of the download was reported within ${Math.round(saveTiming.confirmMs / 1000)} s`,
     }), saveTiming.confirmMs);
-    const [item] = await chrome.downloads.search({ id });
-    if (item) end(item.state, item.error);
+    chrome.downloads.search({ id }).then(([item]) => item && end(item.state, item.error), () => {});
     return { id, ...(await ended) };
   } finally {
     clearTimeout(timer);
@@ -860,18 +905,26 @@ export async function saveBackup(filename) {
 // Imports a backup (validated as a whole first). A stored signing key is never
 // replaced: a backup key that differs is reported in conflicts and the current
 // key, ID and installation stay. Tracked repos take the backup's template and
-// pre-release setting. File keys are added unless the key is a stored repo key.
+// pre-release setting. A key lives in one place: a backup key that is already
+// another repo's key is not imported (a warning says so), a stored file key
+// that the backup brings as a repo key moves to that repo, and backup file
+// keys are added unless the key is a stored repo key.
 // Returns { count, errors, conflicts: [{ key, keptId, backupId }], warnings }.
-export async function importBackup(text) {
-  await ready();
+export const importBackup = operation(async (text) => {
   const { repos, keys, fileKeys, warnings } = await parseBackup(text);
   const conflicts = [];
   await withStateLock(async () => {
     for (const [k, b64] of Object.entries(keys)) {
+      const owner = Object.entries(await listSigningKeys()).find(([o, v]) => v === b64 && o !== k);
+      if (owner) {
+        warnings.push(`${k}: the backup's signing key is already the key of ${owner[0]}; it was not imported for ${k}`);
+        continue;
+      }
       const kept = await putSigningKeyIfAbsent(k, b64);
       if (kept !== b64) conflicts.push({ key: k, keptId: await idOfKey(kept), backupId: await idOfKey(b64) });
     }
     const repoKeys = new Set(Object.values(await listSigningKeys()));
+    for (const [id, b64] of Object.entries(await listFileKeys())) if (repoKeys.has(b64)) await removeFileKey(id);
     for (const [id, b64] of Object.entries(fileKeys)) if (!repoKeys.has(b64)) await putFileKeyIfAbsent(id, b64);
     for (const rec of repos) {
       const k = repoKey(rec);
@@ -888,6 +941,6 @@ export async function importBackup(text) {
     }
   });
   // The backup has no release cache; fetch it so the list shows versions again.
-  const { errors } = await checkAll();
+  const { errors } = await checkAllNow();
   return { count: repos.length, errors, conflicts, warnings };
-}
+});

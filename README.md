@@ -13,10 +13,11 @@ Install and update browser extensions from GitHub releases, the way
   first reads the repo's `releases.atom` feed, which costs no GitHub API quota,
   and skips the API only when the feed shows nothing it could have missed: the
   release selected last time is in the feed with the update time the API
-  reported, and no feed entry is newer than those the last full check saw. A
-  full API check also runs when the release cache is empty, the asset template
-  or pre-release setting changed, the last one is more than 24 hours old, or the
-  feed is unavailable or not a complete Atom document.
+  reported, and the feed's entries (ids and update times) are exactly those the
+  last full check saw. A full API check also runs when the release cache is
+  empty, the asset template or pre-release setting changed, the last one is more
+  than 24 hours old, or the feed is unavailable or not in GitHub's plain Atom
+  form.
 - Install or update with one tap. A `.crx` keeps its author's key and extension ID;
   its CRX3 signatures (RSA and ECDSA P-256) are verified as Chromium does before
   it is handed to the browser, and a damaged or altered file is refused.
@@ -25,8 +26,12 @@ Install and update browser extensions from GitHub releases, the way
 - Install a local `.crx`/`.zip` and optionally track it with a repo. A local `.zip`
   can be signed with a tracked repo's key, with the key of an earlier untracked
   file install, or with a new key. The key of a `.zip` installed without a repo is
-  kept (and exported) until the file is tracked with a repo, which takes it over;
-  if that repo's first check fails, the key goes back to the file keys.
+  kept (and exported) until the file is tracked with a repo, which takes it over
+  (if that repo's first check fails, the key goes back to the file keys), or
+  until you forget it under Files & settings > Kept keys; a `.zip` signed for
+  that extension later installs as a different extension. A key is stored in
+  one place only: an import does not give a key another repo owns to a second
+  repo.
   A local `.crx` keeps its author's key and never changes which extension a
   tracked repo follows.
 - Export/import the list, including the per-repo signing keys and the keys of
@@ -36,6 +41,10 @@ Install and update browser extensions from GitHub releases, the way
   signed with it is still downloading or waiting at the browser's prompt (at
   most two minutes after its download completed). An import never replaces a
   different stored key.
+- Actions run one at a time across the options page, the popup and the
+  background check: an install holds the others until its download has
+  completed (not until you answer the browser's prompt). An action that has
+  to wait says "Waiting for another action…".
 
 ## How it installs
 
@@ -53,7 +62,9 @@ download finishes. That event names no particular build, but Titanium's prompt
 is modal, so a new install of the same extension version replaces an earlier
 one still waiting once its own download completed (its prompt is up): the
 event confirms the newest prompt. A replacement still downloading, or one that
-fails, replaces nothing. The CRX copies in Downloads are deleted after the
+fails, replaces nothing. Because installs run one at a time, a second one starts only
+after the first one's download completed. If the page closes before an install's
+download even started, the install counts as failed after ten minutes. The CRX copies in Downloads are deleted after the
 install, or two minutes after the prompt of a declined or failed one, and
 never while the download is still running. A release or file that would
 install under another extension ID than the installed one waits for your
@@ -66,7 +77,7 @@ confirmation.
   was in Downloads. Chromium 158's source shows no path that hides such a download
   (the location dialog keeps the same download item; search hides only temporary
   and internal downloads); the cause is open. Extainium reports the export from
-  the download's own events and does not search for it afterwards. If no end is
+  the download's own events; a search may only add a result and never delays it. If no end is
   reported within two minutes, it says it could not confirm the save.
 - The extension-less CRX file name that avoids the "Confirm download / Keep"
   step follows from Chromium's source and still needs a check on the phone.

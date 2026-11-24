@@ -78,6 +78,9 @@ export async function fetchReleases(owner, repo, { token, cache = null, enough =
 }
 
 const ATOM_NS = "http://www.w3.org/2005/Atom";
+// GitHub declares Media RSS on the root for each entry's <media:thumbnail>.
+const MEDIA_PREFIX = "media";
+const MEDIA_NS = "http://search.yahoo.com/mrss/";
 const XML_ENTITIES = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
 const NAME = "[A-Za-z_][\\w.:-]*";
 const START_TAG = new RegExp(`<(${NAME})((?:\\s+${NAME}\\s*=\\s*(?:"[^"<]*"|'[^'<]*'))*)\\s*(/?)>`, "y");
@@ -89,12 +92,15 @@ const ATTRIBUTE = new RegExp(`(${NAME})\\s*=\\s*(?:"([^"<]*)"|'([^'<]*)')`, "g")
 // release's updated_at, which moves when an asset is uploaded or the release
 // edited. Service workers have no DOMParser, so the XML is read here: elements
 // with attributes, comments, processing instructions, CDATA sections, the
-// predefined entities and character references. The supported form is
-// GitHub's: a <feed> root in the Atom default namespace, whose unprefixed
-// <entry> children hold one <id> and one <updated> (a date) each. Anything
-// else (a DOCTYPE, an Atom namespace declared elsewhere, unclosed or
-// mismatched elements, text outside the root) is rejected, so an unparsed
-// document is never taken for an empty feed.
+// predefined entities and character references. Only GitHub's plain form is
+// accepted: a <feed> root that declares the Atom default namespace (and at
+// most GitHub's xmlns:media="http://search.yahoo.com/mrss/" and an xml:lang),
+// unprefixed elements apart from media:*, no other namespace declaration
+// anywhere, and no prefixed attribute other than xml:*; its <entry> children
+// hold one <id> and one <updated> (a date) each. Anything else (a DOCTYPE,
+// another prefix, an entity other than the five predefined ones, unclosed or
+// mismatched elements, text outside the root) is rejected, so the check uses
+// the API rather than a partly understood feed.
 export function parseReleaseFeed(text) {
   const fail = (msg) => new Error(`parse releases feed: ${msg}`);
   const notAtom = () => fail(`not an Atom feed: ${JSON.stringify(text.slice(0, 60))}`);
@@ -103,7 +109,7 @@ export function parseReleaseFeed(text) {
     if (ref.endsWith(";")) {
       if (/^#[0-9]+$/.test(body)) cp = Number(body.slice(1));
       else if (/^#x[0-9a-fA-F]+$/.test(body)) cp = parseInt(body.slice(2), 16);
-      else if (body in XML_ENTITIES) return XML_ENTITIES[body];
+      else if (Object.hasOwn(XML_ENTITIES, body)) return XML_ENTITIES[body];
     }
     if (cp === null || cp === 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
       throw fail(`bad character reference ${JSON.stringify(ref.slice(0, 20))} at byte ${at + off}`);
@@ -113,6 +119,7 @@ export function parseReleaseFeed(text) {
   const entries = [];
   const stack = []; // open elements: { name, text (for <id>/<updated> of an entry), entry }
   let rootSeen = false;
+  let mediaDeclared = false;
   const addText = (s, at) => {
     const top = stack.at(-1);
     if (!top) {
@@ -155,15 +162,25 @@ export function parseReleaseFeed(text) {
       const [, name, rawAttrs, selfClosing] = m;
       const attrs = {};
       for (const [, n, v1, v2] of rawAttrs.matchAll(ATTRIBUTE)) attrs[n] = decode(v1 ?? v2, pos);
+      const unsupported = (what) => fail(`unsupported ${what} on <${name}> at byte ${pos}`);
       if (!stack.length) {
         if (rootSeen) throw fail(`a second root element <${name}> at byte ${pos}`);
         if (name !== "feed" || attrs.xmlns !== ATOM_NS) throw notAtom();
+        for (const [n, v] of Object.entries(attrs)) {
+          if (n.startsWith("xmlns:") && !(n === `xmlns:${MEDIA_PREFIX}` && v === MEDIA_NS)) throw unsupported(`namespace declaration ${n}="${v}"`);
+        }
+        mediaDeclared = attrs[`xmlns:${MEDIA_PREFIX}`] === MEDIA_NS;
         rootSeen = true;
       } else {
-        // Unprefixed names below the root are Atom only while no element redeclares the namespaces.
         for (const [n, v] of Object.entries(attrs)) {
-          if (n === "xmlns" || (n.startsWith("xmlns:") && v === ATOM_NS)) throw fail(`unsupported namespace declaration ${n}="${v}" on <${name}> at byte ${pos}`);
+          if (n === "xmlns" || n.startsWith("xmlns:")) throw unsupported(`namespace declaration ${n}="${v}"`);
         }
+      }
+      for (const n of Object.keys(attrs)) {
+        if (n.includes(":") && !n.startsWith("xml:") && !n.startsWith("xmlns:")) throw unsupported(`prefixed attribute ${n}`);
+      }
+      if (name.includes(":") && !(mediaDeclared && name.startsWith(`${MEDIA_PREFIX}:`) && name.indexOf(":") === name.lastIndexOf(":"))) {
+        throw fail(`unsupported element <${name}> at byte ${pos}`);
       }
       const parent = stack.at(-1);
       const el = { name };

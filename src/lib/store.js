@@ -13,6 +13,8 @@
 //   "schema"           storage format version (SCHEMA)
 // Every read-modify-write runs inside withStateLock, a Web Lock shared by the
 // service worker and the extension pages, so no write is based on a stale read.
+// Every user or background operation that changes state (manager.js) runs as a
+// whole inside withOpLock, a second Web Lock, so operations never interleave.
 
 import { base64Decode, extensionIdFromSpki, importSigningKey } from "./crx.js";
 import { deriveTemplate, parseRepo, validateTemplate, VERSION_TOKEN } from "./releases.js";
@@ -26,6 +28,7 @@ export const SCHEMA = 2;
 export const BACKUP_FORMAT = "extainium-backup";
 export const BACKUP_VERSION = 3;
 const LOCK_NAME = "extainium-state";
+const OP_LOCK_NAME = "extainium-op";
 
 export const repoKey = (r) => `${r.owner}/${r.repo}`.toLowerCase();
 
@@ -34,14 +37,37 @@ export function withStateLock(fn) {
   return navigator.locks.request(LOCK_NAME, () => fn());
 }
 
+// Runs fn() while holding the operation lock in this browser profile: one
+// operation at a time across the service worker and the extension pages. The
+// browser releases the lock when the context holding it goes away. Not
+// re-entrant: code inside an operation calls other operations' internals,
+// never withOpLock again (that would wait for itself). When another operation
+// holds the lock, onWait() is called before waiting; a function it returns is
+// called once the lock is granted.
+export async function withOpLock(fn, onWait = null) {
+  let ran = false;
+  const result = await navigator.locks.request(OP_LOCK_NAME, { ifAvailable: true }, (lock) => {
+    if (!lock) return null;
+    ran = true;
+    return fn();
+  });
+  if (ran) return result;
+  const granted = onWait ? onWait() : null;
+  return navigator.locks.request(OP_LOCK_NAME, () => {
+    if (typeof granted === "function") granted();
+    return fn();
+  });
+}
+
 // Record: { owner, repo, template, includePrereleases, extensionId,
 //   installed: { tag, digest, version } | null  (confirmed by management.onInstalled),
 //   identityChange: { from, to, tag, asset } | null  (relink waiting for confirmation),
 //   releases, pages, feed, checkedCriteria, fullCheckAt, checkedAt, error, addedAt }
 // releases and pages are the release cache of the last full check (API, at
-// fullCheckAt); feed ({ newest }: the latest <updated>, in ms, of the
-// releases.atom entries it saw, or null) and checkedCriteria ({ template,
-// includePrereleases } it used) decide whether the next check needs the API.
+// fullCheckAt); feed ({ entries: [[id, updated], ...] }: every releases.atom
+// entry it saw, or null; records of older versions hold { newest } and get a
+// full check) and checkedCriteria ({ template, includePrereleases } it used)
+// decide whether the next check needs the API.
 export function newRecord(owner, repo) {
   return {
     owner,

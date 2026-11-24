@@ -77,6 +77,12 @@
             <p id="trackStatus" class="inline-status"></p>
           </form>
         </div>
+        <div id="fileKeys" class="subgroup" hidden>
+          <h3 id="fileKeysHeading" class="label">Kept keys</h3>
+          <p class="hint">Keys of .zip files installed without a repository. Forgetting a key deletes it: a .zip signed for that extension later installs as a different extension, without its data.</p>
+          <ul id="fileKeyList" class="key-list" aria-labelledby="fileKeysHeading"></ul>
+          <p id="keysStatus" class="inline-status"></p>
+        </div>
       </section>
 
       <section class="group" aria-labelledby="tokenHeading">

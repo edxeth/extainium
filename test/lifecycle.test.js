@@ -440,33 +440,48 @@ const completeDownload = (env, id) => {
   env.emitChanged({ id, state: { previous: "in_progress", current: "complete" } });
 };
 
-// F2 repro: the second hand-off cannot start while the first is in flight.
-test("a replacement whose download fails to start supersedes nothing: the in-flight first install keeps its key and stays confirmable", async () => {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// F2 repro, with the op lock: a replacement started while the first download
+// is in flight waits for it; when its download then fails to start it supersedes nothing.
+test("a replacement started during the first download waits for it, and when it fails to start supersedes nothing", async () => {
   const { env } = await zipBuildsSetup();
   const first = await startInFlight(env, "v1");
   const download = chrome.downloads.download;
-  chrome.downloads.download = async () => { throw new Error("start rejected"); };
-  await assert.rejects(installRelease(K, "v2"), /start rejected/);
+  let calls = 0;
+  chrome.downloads.download = async () => { calls++; throw new Error("start rejected"); };
+  const second = installRelease(K, "v2");
+  await sleep(10);
+  assert.equal(calls, 0, "the replacement waits while the first download is in flight");
+  completeDownload(env, first.id);
+  await first.installing;
+  await assert.rejects(second, /start rejected/);
   chrome.downloads.download = download;
+  assert.equal(calls, 1);
   const e = entryOf(env, "v1");
   assert.deepEqual({ version: e.version, signedWith: e.signedWith, supersededBy: e.supersededBy }, { version: "1.0", signedWith: K, supersededBy: null });
-  completeDownload(env, first.id);
   const { extensionId } = await first.installing;
   await browserInstalls(env, extensionId, "1.0");
   assert.equal((await trackedView())[0].record.installed.tag, "v1");
 });
 
-test("a removal with uninstall after a replacement failed to start keeps the key of the in-flight first install", async () => {
+test("a removal with uninstall queued behind an in-flight install and a replacement that fails to start keeps the key of the first install's prompt", async () => {
   const { env, pkcs8 } = await zipBuildsSetup();
   const first = await startInFlight(env, "v1");
   const download = chrome.downloads.download;
   chrome.downloads.download = async () => { throw new Error("start rejected"); };
-  await assert.rejects(installRelease(K, "v2"), /start rejected/);
-  chrome.downloads.download = download;
-  await manager.removeRepo(K, true);
-  assert.equal(env.store["key:" + K], pkcs8, "held by the first install");
+  const second = installRelease(K, "v2");
+  const removal = manager.removeRepo(K, true);
+  await sleep(10);
+  assert.ok(env.store["repo:" + K], "the removal waits");
   completeDownload(env, first.id);
   await first.installing;
+  await assert.rejects(second, /start rejected/);
+  chrome.downloads.download = download;
+  await removal;
+  assert.equal(env.store["key:" + K], pkcs8, "held by the first install's prompt");
+  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined);
 });
 
 // F2 repro: the event of the first prompt arrives while the second download is only starting.
