@@ -1,11 +1,19 @@
 # Extainium
 
-Install and update browser extensions from GitHub releases, the way
-[Obtainium](https://github.com/ImranR98/Obtainium) does for Android apps. Built for
-[Titanium Browser for Android](https://github.com/jqssun/android-titanium-browser),
-a Chromium browser with desktop extension support.
+Install and update browser extensions from GitHub releases, the Chrome Web
+Store and their authors' own update servers, the way
+[Obtainium](https://github.com/ImranR98/Obtainium) does for Android apps. One
+list shows every installed extension and where its updates come from.
+
+Runs in [Titanium Browser for Android](https://github.com/jqssun/android-titanium-browser)
+(a Chromium browser with desktop extension support) and in desktop
+[ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium),
+where it replaces [Chromium Web Store](https://github.com/NeverDecaf/chromium-web-store):
+ungoogled-chromium updates no extension by itself.
 
 ## Install
+
+### Titanium (Android)
 
 1. In Titanium, open the [latest release](../../releases/latest) and tap
    `extainium.crx`; in "Choose where to download" tap **Download**.
@@ -19,7 +27,20 @@ a Chromium browser with desktop extension support.
    effect once no Extainium tab is open; to update right away, tap **Update** on
    Titanium's extensions page (developer mode).
 
-Titanium's extensions page lists Extainium under "Review 1 extension that may
+### ungoogled-chromium (desktop)
+
+1. Open `chrome://flags/#extension-mime-request-handling`, set it to
+   **Always prompt for install** and relaunch. Without it, extension files only
+   download and nothing installs (Extainium shows a hint with this setting).
+2. Open the [latest release](../../releases/latest) and click `extainium.crx`;
+   click **Add extension**.
+3. Extainium tracks itself through its own update address, so it updates like
+   every other tracked extension (remove its card to stop that). On the
+   **Installed** tab, click **Track** for each store or self-hosted extension
+   you want Extainium to update; the browser asks once per host for access.
+4. Each install or update shows the browser's **Add extension** prompt.
+
+On Titanium, the extensions page lists Extainium under "Review 1 extension that may
 be unsafe" ("can't verify where this extension comes from"). Chromium shows
 this for every extension whose update address is not the Chrome Web Store's,
 and nothing in an extension can avoid it. Tap **Keep this extension** once; it
@@ -92,7 +113,7 @@ stays dismissed across updates.
 
 The same hand-off installs on desktop ungoogled-chromium only with
 `chrome://flags/#extension-mime-request-handling` set to "Always prompt for
-install" (then relaunch). Without it the download completes and nothing
+install" (see Install). Without it the download completes and nothing
 installs; Extainium notices that (the browser deletes the copy at once) and
 says so, also when the page that started the install was closed meanwhile
 (the background clean-up checks it). An **Add** answered within moments looks
@@ -127,11 +148,10 @@ whatever the name (Chromium 158: `download_file_types.asciipb` `crx` entry,
 `download_target_determiner.cc` `GenerateSafeFileName`, `extensions::IsExtensionDownload`).
 An install counts once the browser reports
 it (`management.onInstalled` with the expected ID and version), not when the
-download finishes. That event names no particular build, but Titanium's prompt
-is modal, so a new install of the same extension version replaces an earlier
-one still waiting once its own download completed (its prompt is up): the
-event confirms the newest prompt. A replacement still downloading, or one that
-fails, replaces nothing. Because installs run one at a time, a second one starts only
+download finishes. That event names no particular build; when two
+different builds of one version wait, Extainium records only the version, and a
+later install never ends an earlier one that may still apply. Because installs
+run one at a time, a second one starts only
 after the first one's download completed. If the page closes before an install's
 download even started, the install counts as failed after ten minutes. The CRX copies in Downloads are deleted after the
 install, or two minutes after the prompt of a declined or failed one, and
