@@ -14,11 +14,11 @@ async function ensureAlarm() {
 // Runs fn, logging its failure, so one failed step does not stop the next.
 const step = (what, fn) => () => Promise.resolve().then(fn).catch((e) => console.error(`[Extainium] ${what}:`, e));
 
-// After Extainium installed a newer Extainium, the new instance confirms that
-// install (the old one was replaced before management.onInstalled reached it).
-const confirmSelf = step("confirm own install", confirmOwnInstall);
-// Compares the browser's versions with updates whose copy vanished (Chromium may
-// apply them later, at the latest at its start, without an install event).
+// After Extainium installed a newer Extainium, the new instance's update event is
+// that install's event (the old one was replaced before management.onInstalled reached it).
+const confirmSelf = (details) => step("confirm own install", () => confirmOwnInstall(details))();
+// Compares the browser's versions with pending installs (Chromium may apply
+// them later, at the latest at its start, without an install event).
 // startedAt: when the browser started (reconcileInstalls).
 const reconcile = (startedAt = null) => step("reconcile installs", () => reconcileInstalls({ startedAt }))();
 // On desktop, Extainium follows its own update URL unless the user removed it (Titanium updates it itself).
@@ -26,11 +26,12 @@ const selfTrack = step("track Extainium itself", trackSelf);
 const sweep = step("sweep downloads", () => sweepDownloads());
 
 // The badge text does not survive a browser restart or an extension update.
-chrome.runtime.onInstalled.addListener(() =>
-  confirmSelf().then(() => reconcile()).then(ensureAlarm).then(selfTrack).then(refreshBadge));
+chrome.runtime.onInstalled.addListener((details) =>
+  confirmSelf(details).then(() => reconcile()).then(ensureAlarm).then(selfTrack).then(refreshBadge));
+// A start is no install event: a version that changed since a hand-off is reconcile's evidence.
 chrome.runtime.onStartup.addListener(() => {
   const startedAt = Date.now();
-  return confirmSelf().then(ensureAlarm).then(sweep).then(() => reconcile(startedAt)).then(selfTrack).then(refreshBadge);
+  return ensureAlarm().then(sweep).then(() => reconcile(startedAt)).then(selfTrack).then(refreshBadge);
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {

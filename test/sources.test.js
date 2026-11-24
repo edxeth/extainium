@@ -465,7 +465,7 @@ test("the new operations take the operation lock once each", async () => {
 
 // ---- Extainium updating itself ----
 
-// Contract: the new instance confirms its own pending install on start.
+// Contract: the new instance's runtime.onInstalled (reason "update") confirms its own pending install.
 test("Extainium tracks its own update URL, installs its next version, and the new instance confirms that install", async () => {
   const { privateKey } = nodeCrypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
   const pkcs8 = new Uint8Array(privateKey.export({ type: "pkcs8", format: "der" }));
@@ -477,14 +477,14 @@ test("Extainium tracks its own update URL, installs its next version, and the ne
   env.manifestVersion = "0.9";
   fakeGithub([]);
   fakeUpdateServers({ files: { [updateUrl]: updatesXml({ appid: selfId, version: "1.0", codebase }), [codebase]: await packCrx3(zip, pkcs8) } });
-  assert.equal(await manager.confirmOwnInstall(), false, "nothing waits");
+  assert.equal(await manager.confirmOwnInstall({ reason: "update", previousVersion: "0.8" }), false, "nothing waits");
   const key = await trackInstalled(selfId);
   assert.deepEqual((await trackedView())[0].needsOrigins, []);
   await installRelease(key);
   // The browser replaces the running Extainium: no management.onInstalled reaches the old instance.
   env.install(selfId, "1.0", "Extainium");
   env.manifestVersion = "1.0";
-  assert.equal(await manager.confirmOwnInstall(), true);
+  assert.equal(await manager.confirmOwnInstall({ reason: "update", previousVersion: "0.9" }), true);
   const [view] = await trackedView();
   assert.equal(view.record.installed.version, "1.0");
   assert.equal(view.state, "current");

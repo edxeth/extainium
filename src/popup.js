@@ -56,7 +56,7 @@ function row(v) {
         h("span", { "aria-hidden": "true" }, " → "), h("span", { className: "visually-hidden" }, ", latest "),
         h("span", { className: "to" }, latest),
         v.sourceLabel ? ` · ${v.sourceLabel}` : null,
-        v.state === "waiting" ? " · waiting for Chromium" : pending ? " · waiting for the browser" : null)));
+        v.state === "not-applied" ? " · not applied yet" : pending ? " · waiting for the browser" : null)));
 }
 
 // Needs a look in Extainium: a release that would install as another extension, or a
@@ -74,13 +74,13 @@ function attentionRow(v) {
 
 async function render() {
   const view = await trackedView();
-  const { state, updates, attention, waiting, headline: summary } = popupSummary(view);
+  const { state, updates, attention, notApplied, headline: summary } = popupSummary(view);
   document.body.dataset.state = state;
   // A live region: write only a changed headline, so a check with the same result is not read twice.
   if ($("summary").textContent !== summary) $("summary").textContent = summary;
   $("emptyHint").hidden = state !== "empty";
   $("check").hidden = state === "empty";
-  $("updates").replaceChildren(...updates.map(row), ...attention.map(attentionRow), ...waiting.map(row));
+  $("updates").replaceChildren(...updates.map(row), ...attention.map(attentionRow), ...notApplied.map(row));
   const { lastCheck } = await chrome.storage.local.get("lastCheck");
   const tracked = state === "current" ? `${plural(view.length, "extension", "extensions")} tracked · ` : "";
   $("lastCheck").textContent = state === "empty" ? "" : tracked + checkLine(lastCheck, view, when);

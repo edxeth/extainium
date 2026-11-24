@@ -2,10 +2,10 @@
 //   "repo:owner/name"  tracked repo record (see newRecord)
 //   "repo:cws:<id>", "repo:url:<id>"  tracked extension of the Chrome Web
 //                      Store or of a self-hosted update URL (newSourceRecord)
-//   "installBlocked"   { at, hint: "flag" }: a desktop install the browser
-//                      refused (manager.js environment)
-//   "installWorkedAt"  time of the last confirmed install; an older refusal
-//                      candidate cannot set installBlocked (manager.js judgeRefusal)
+//   "installBlocked"   { at, hint: "flag", extensionId }: a desktop
+//                      install the browser most likely refused (manager.js environment)
+//   "installWorkedAt"  time of the last install the browser's evidence resolved; an
+//                      older refusal candidate cannot set installBlocked (manager.js judgeRefusal)
 //   "selfOptOut"       time the user removed Extainium's own record; trackSelf
 //                      never tracks it again (manager.js removeRepo, trackSelf)
 //   "lastCheck"        { at, updates } of the last checkAll (older ones also

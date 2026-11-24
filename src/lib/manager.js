@@ -124,17 +124,14 @@ const SOURCE_LABELS = { github: "GitHub", cws: "Chrome Web Store" };
 //   sourceLabel, sourceUrl, needsOrigins }] for the UI and the badge.
 // state: updateState's states for GitHub records, sourceState's for the
 // others, or "identity-change" while record.identityChange waits for
-// confirmIdentityChange, or "waiting" instead of "update" while a hand-off of
-// the latest build may have been accepted and wait for Chromium to apply it
-// (pendingInstall.waiting): tentative, the browser's version alone decides.
-// pendingInstall: { version, tag, promptAt, waiting } of a CRX handed to the
-// browser whose install was not confirmed yet, or null: the newest prompt
-// (promptOrder) while it may still be answered (isPromptWaiting) or when it
-// may have been accepted, else the newest one that may have been accepted, else
-// the newest; promptAt is when its "Add extension?" prompt appeared (its
-// download completed), null while it is still downloading (see
-// isPromptWaiting); waiting: its copy vanished without an install event
-// (vanishedAt, see judgeVanished), so Chromium may apply it later.
+// confirmIdentityChange, or "not-applied" instead of "update" or
+// "not-installed" while a hand-off of the latest build is pending after its
+// prompt: the browser has not applied it yet, and whether it will is not known
+// (see the hand-off entries); it still offers the install.
+// pendingInstall: { version, tag, promptAt } of the newest pending hand-off
+// (promptOrder: the newest prompt), or null; promptAt is when its "Add
+// extension?" prompt appeared (its download completed), null while it is
+// still downloading.
 // source: "github" | "cws" | "updateUrl"; latest: latestFor(record) for
 // GitHub, record.latest ({ version, codebase, size, hash } or null) for the
 // others; title: the best known name; sourceLabel: "GitHub", "Chrome Web
@@ -161,15 +158,11 @@ export async function trackedView() {
     const open = installs
       .filter((i) => i.repoKey === key && i.extensionId === record.extensionId && !i.confirmedAt && i.version)
       .sort(promptOrder);
-    const promptOf = (i) => (i.downloadDone ? promptTime(i) : null);
-    // A later dismissed prompt does not hide an earlier one that may have been accepted.
-    const pending = open[0] && (open[0].vanishedAt || isPromptWaiting({ promptAt: promptOf(open[0]) }))
-      ? open[0]
-      : open.find((i) => i.vanishedAt) || open[0];
+    const pending = open[0] || null;
     const pendingInstall = pending
-      ? { version: pending.version, tag: pending.installed && pending.installed.tag, promptAt: promptOf(pending), waiting: !!pending.vanishedAt }
+      ? { version: pending.version, tag: pending.installed && pending.installed.tag, promptAt: pending.downloadDone ? promptTime(pending) : null }
       : null;
-    if (state === "update" && pending && pending.vanishedAt && isLatestBuild(pending.installed, latest, github)) state = "waiting";
+    if ((state === "update" || state === "not-installed") && open.some((i) => i.downloadDone && isLatestBuild(i.installed, latest, github))) state = "not-applied";
     return {
       key, record, latest, ext, state,
       hasKey: key in keys,
@@ -218,12 +211,14 @@ async function installNeedsFlag() {
 }
 
 // { platform: "android" | "desktop", browserVersion, installNeedsFlag,
-//   installBlocked: { at, hint: "flag" } | null }. installBlocked: a desktop
-// hand-off whose download completed within INSTALL_REFUSED_MS of its start
-// (no "Add extension?" prompt held it) and whose copy the browser's installer
-// deleted without an install: the browser refused the off-store install, so
-// the flag is not set. Cleared by the next confirmed install or by
-// dismissInstallBlocked.
+//   installBlocked: { at, hint: "flag", extensionId } | null }.
+// installBlocked: a desktop hand-off whose download completed within
+// INSTALL_REFUSED_MS of its start (no "Add extension?" prompt held it, or it
+// was answered at once) and whose copy the browser's installer deleted without
+// an install: most likely the browser refused the off-store install, so the
+// flag is not set (judgeRefusal). Retracted by any later evidence that an
+// install worked (an install event of that extension, or any install resolved
+// by the browser's evidence) or by dismissInstallBlocked.
 export async function environment() {
   await ready();
   const [platform, version, needsFlag, { installBlocked = null }] = await Promise.all([
@@ -309,24 +304,16 @@ function isLatestBuild(installed, latest, github) {
   return !digest || !installed.digest || installed.digest === digest;
 }
 
-// The state of the hand-off token returned (installFile's token): "confirmed",
-// "waiting" (its copy vanished without an install event: Chromium may apply it
-// later, see vanishedAt), "pending" (not confirmed yet, or declined) or null
-// once the entry is gone or ended.
+// The state of the hand-off token returned (installFile's token): "confirmed"
+// (by the browser's evidence), "pending" (not applied yet, whatever happened
+// at the prompt) or null once the entry is gone or ended (resolved together
+// with another build of its version, or ruled out, see the hand-off entries).
 export async function handOffState(token) {
   await ready();
   const e = await getInstall(token);
   if (!e) return null;
   if (e.confirmedAt) return "confirmed";
-  if (!e.version) return null;
-  return e.vanishedAt ? "waiting" : "pending";
-}
-
-// True while a pending install ({ promptAt }, as in trackedView) may still be
-// confirmed at the browser's prompt: still downloading, or within
-// PENDING_GRACE_MS of its prompt, the clock the key holds and cleanup use.
-export function isPromptWaiting(pending, now = Date.now()) {
-  return pending.promptAt === null || now - pending.promptAt < PENDING_GRACE_MS;
+  return e.version ? "pending" : null;
 }
 
 // The badge background: the UI accent, --accent in style.css (light scheme,
@@ -692,59 +679,65 @@ export const setPrereleases = operation(async (key, includePrereleases) => {
 // ---- Hand-off to the browser and download cleanup ----
 // Each CRX handed to the browser gets an "install:<token>" entry:
 //   { token, repoKey|null, extensionId, version|null, installed: {tag, digest, version},
-//     crxHash, signedWith|null, supersededBy|null, downloadId|null, startedAt|null,
+//     crxHash, fromVersion|null, signedWith|null, downloadId|null, startedAt|null,
 //     downloadDone, promptAt|null, at, confirmedAt|null, fileGone, removeError|null,
-//     refusalCandidate?, fromVersion?, vanishedAt?, fileRemoved?, foundGone? }
+//     refusalCandidate? }
+// version: the manifest version while the entry is pending; null once it ended
+// without being confirmed (failed, detached, or resolved by another entry).
+// crxHash (sha256 hex of the CRX) names the build the entry stands for.
 // startedAt: when download() returned the download ID.
-// fromVersion: the extension's installed version at the hand-off, or null.
-// vanishedAt: when Extainium saw the prompted copy gone without an install
-// event and without deleting it itself (judgeVanished). Only a hint: Chromium's
-// installer deletes the copy when the prompt is accepted, also when it then
-// delays the update of a running extension until its processes are gone or the
-// browser restarts, but also on an installer failure, and anyone may delete it.
-// Such an entry waits, past CONFIRM_WINDOW_MS, for its install event or for
-// reconcileInstalls, which compares the browser's version.
+// fromVersion: the extension's installed version at the hand-off (null: not
+// installed), moved on to the version each later install evidence reports
+// (settleInstalled): a later version change is evidence for this entry only
+// when it is a change from fromVersion. Entries of older versions lack it.
+// downloadDone: the hand-off download completed, so the browser shows its
+// "Add extension?" prompt; promptAt: when that was (the browser's completion
+// time; null before; entries of older versions lack it and count from at).
 // refusalCandidate: a desktop hand-off (installNeedsFlag) whose download
 // completed within INSTALL_REFUSED_MS of its start: true until judged
-// (judgeRefusal), then false. A candidate's copy is judgeRefusal's alone,
-// never judgeVanished's.
-// crxHash (sha256 hex of the CRX) names the build the entry stands for.
-// downloadDone: the hand-off download completed, so the browser shows its
-// "Add extension?" prompt; promptAt: when that was seen (null before; entries
-// of older versions lack it and count from at).
+// (judgeRefusal), then false.
 // signedWith names the repo whose stored signing key signed the CRX, while the
-// install may still use that key (cleared once it is confirmed, failed or
-// superseded); a key removeRepo marked for deletion stays until no entry holds
-// it (holdsKey): while the install is in flight (no download ID yet, or
+// install may still use that key (cleared once it is confirmed or ended); a
+// key removeRepo marked for deletion stays until no entry holds it
+// (holdsKey): while the install is in flight (no download ID yet, or
 // downloading), and then PENDING_GRACE_MS from promptAt.
+//
+// What happened at the prompt is never inferred: Chromium's installer deletes
+// the downloaded copy when the prompt is accepted, also when it then delays the
+// update of a running extension until its processes are gone or the browser
+// restarts, and also when the install fails; a dismissed prompt leaves it;
+// anyone may delete it; and the browser's file checks are throttled
+// (crx_installer.cc CleanupTempFiles, downloads_api.cc). So the copy is only
+// Extainium's to delete, never evidence (owner decision, 2026-11-24): every
+// pending entry after its prompt is in one neutral state (trackedView's
+// "not-applied") until the browser's evidence resolves it:
+// - management.onInstalled with the ID and version (handleExtensionInstalled),
+//   or a start of Extainium itself after its own update (confirmOwnInstall);
+// - a reported version that changed since the hand-off (fromVersion), read at
+//   the browser's start and by the periodic comparison (reconcileInstalls).
+// The evidence names a version, not a build: when the pending entries of that
+// version stand for one build, it is committed (record.installed), else only
+// the version (digest null; the check then compares by version), never a
+// guessed digest (settleInstalled). A later hand-off never ends an earlier
+// one. A pending entry also ends when the evidence rules it out: its extension
+// runs a newer version, was uninstalled since the hand-off, or the browser
+// started after its prompt without applying it (Chromium applies pending
+// updates while it starts). Only then is it forgotten; there is no expiry by
+// time, as an accepted update may wait for days until the browser restarts.
+//
 // A hand-off runs inside its operation up to its download's completion, so the
-// next hand-off starts only after that: hand-offs, their superseding and the
-// attribution of install events are sequential. An entry stays in flight
-// after its operation only when its page went away meanwhile (the browser then
-// releases the operation lock). With a download ID, the sweep reads the
-// download's end from the browser. Without one, the CRX's blob URL died with
-// that page, so no download can start any more: after NO_DOWNLOAD_ID_MS the
-// entry counts as failed and releases its key hold (holdsKey, sweepDownloads).
-// management.onInstalled with the same ID and version confirms an entry: only
-// then is record.installed committed. The event names no build, but
-// Titanium's "Add extension?" prompt is modal, so a new prompt replaces the
-// earlier one: once a hand-off's download completes, it supersedes the earlier
-// prompted, unconfirmed entries of the same ID and version (version null,
-// supersededBy its token) except those whose copy vanished (judgeVanished: that
-// prompt may have been accepted, and Chromium may still apply it), and an event
-// confirms the newest vanished prompted entry, else the newest prompted entry
-// (promptOrder), or the entry in flight when none was prompted (Chromium may
-// report the install before download() returns). When several are in flight
-// and none was prompted (possible only after a page went away), the event is
-// ambiguous and confirms none. An entry still in flight supersedes nothing yet
-// and is not ended by an event; a hand-off that fails supersedes nothing. The downloaded
-// copy is deleted after the confirmation (superseded copies of that version
-// with it), or PENDING_GRACE_MS after promptAt when the prompt was declined or
-// the install failed, and only once the download has finished. Only downloads
+// next hand-off starts only after that. An entry stays in flight after its
+// operation only when its page went away meanwhile (the browser then releases
+// the operation lock). With a download ID, the sweep reads the download's end
+// from the browser. Without one, the CRX's blob URL died with that page, so no
+// download can start any more: after NO_DOWNLOAD_ID_MS the entry counts as
+// failed and releases its key hold (holdsKey, sweepDownloads). An entry still
+// in flight is resolved by an install event only when no entry of that version
+// was prompted (Chromium may report the install before download() returns).
+// The downloaded copy is deleted after the confirmation, or PENDING_GRACE_MS
+// after promptAt, and only once the download has finished. Only downloads
 // Extainium started are ever deleted.
 export const PENDING_GRACE_MS = 2 * 60 * 1000;
-// How long an unconfirmed install may still be confirmed after its copy was deleted.
-export const CONFIRM_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const SWEEP_ALARM = "sweep-downloads";
 // How long an entry without a download ID stays in flight (see above). A live
 // hand-off gets its ID from download() within moments; this only bounds
@@ -761,29 +754,21 @@ const getInstall = async (token) => (await chrome.storage.local.get(INSTALL_PREF
 // A download still in progress is left alone (erase would cancel it). The item
 // is erased only once its file is gone or the download was interrupted (erase
 // deletes the partial file). Keeps the entry with removeError when the file
-// could not be deleted.
+// could not be deleted. What it finds says nothing about the install.
 // quiet: a failure is not recorded as removeError (a retry follows).
-// fileRemoved: Extainium removed the file itself (the item may still be listed
-// when erase failed), so its absence says nothing about the installer.
-// foundGone: the file was gone already, not deleted by Extainium (the item
-// says so, or removeFile reports it deleted after a stale file check): the
-// sweep's evidence for judgeVanished.
 async function deleteCopy(entry, { quiet = false } = {}) {
   const id = entry.downloadId;
   try {
     const [item] = await chrome.downloads.search({ id });
     if (!item) return { ...entry, fileGone: true, removeError: null };
     if (item.state === "in_progress") return entry;
-    if (copyGone(item)) entry = { ...entry, foundGone: true };
-    else if (item.state === "complete") {
+    if (item.state === "complete" && item.exists !== false) {
       try {
         await chrome.downloads.removeFile(id);
-        entry = { ...entry, fileRemoved: true };
       } catch (e) {
         // "Invalid downloadId": the item was erased meanwhile, nothing left to address.
         if (/invalid download ?id/i.test(e.message)) return { ...entry, fileGone: true, removeError: null };
         if (!/already deleted/i.test(e.message)) throw e;
-        entry = { ...entry, foundGone: true };
       }
     }
     await chrome.downloads.erase({ id });
@@ -821,18 +806,13 @@ async function retryDeletes(tokens) {
 // unassociated, kept only until its copy is deleted.
 const detached = (e) => ({ ...e, repoKey: null, version: e.confirmedAt ? e.version : null });
 
-// Saves entry, or drops it once nothing is left to do for it: confirmed and
-// its copy deleted; a failed, replaced or detached install (version null)
-// with nothing left on disk; or an
-// unconfirmed install whose copy is gone and whose confirmation window passed.
-function isFinished(e, now) {
-  if (e.confirmedAt) return e.fileGone;
-  if (!e.version) return e.fileGone;
-  return e.fileGone && !e.vanishedAt && now - e.at >= CONFIRM_WINDOW_MS;
-}
+// Saves entry, or drops it once nothing is left to do for it: confirmed or
+// ended (version null), and its copy deleted. A pending entry stays until the
+// browser's evidence resolves or ends it (see above).
+const isFinished = (e) => (e.confirmedAt || !e.version) && e.fileGone;
 
-function storeInstall(entry, now = Date.now()) {
-  return isFinished(entry, now) ? removeInstall(entry.token) : putInstall(entry);
+function storeInstall(entry) {
+  return isFinished(entry) ? removeInstall(entry.token) : putInstall(entry);
 }
 
 // The time an entry's prompt appeared, or its hand-off time for entries of older versions.
@@ -840,7 +820,7 @@ const promptTime = (e) => e.promptAt ?? e.at;
 
 // Unconfirmed entries in the order their prompts appeared, newest first:
 // entries whose download completed, by promptTime; then those still in flight, newest first.
-const promptOrder = (a, b) => Number(b.downloadDone) - Number(a.downloadDone) || promptTime(b) - promptTime(a);
+const promptOrder = (a, b) => Number(b.downloadDone) - Number(a.downloadDone) || promptTime(b) - promptTime(a) || b.at - a.at;
 
 // True while install entry e is in flight: its download may still complete.
 const inFlight = (e, now) => !e.downloadDone && (e.downloadId !== null || now - e.at < NO_DOWNLOAD_ID_MS);
@@ -868,9 +848,10 @@ async function deleteReleasedKeys(now = Date.now()) {
 // Inside an operation. claim: { key, keyPkcs8 (the repo key that signed the
 // CRX, or null), change } for an install of tracked repo key; linked (claimLocked) in the same locked step that records
 // the entry. newFileKey: the new key of a zip installed without a repo, kept
-// in the file-key store. Returns { token, promptAt, confirmed } once the
-// download completed: promptAt is when the prompt appeared, confirmed is true
-// when the browser already reported the install.
+// in the file-key store. Returns { token, promptAt, confirmed, fromVersion }
+// once the download completed: promptAt is when the prompt appeared, confirmed
+// is true when the browser already reported the install, fromVersion the
+// extension's version at the hand-off (null: not installed).
 async function handOff(crx, { repoKey: key, extensionId, manifest, installed, claim = null, newFileKey = null }) {
   const token = crypto.randomUUID();
   const crxHash = await sha256Hex(crx);
@@ -885,7 +866,7 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
     if (newFileKey) await putFileKeyIfAbsent(extensionId, newFileKey);
     await putInstall({
       token, repoKey: key, extensionId, version: manifest.version, installed, crxHash, fromVersion,
-      signedWith: claim && claim.keyPkcs8 ? claim.key : null, supersededBy: null,
+      signedWith: claim && claim.keyPkcs8 ? claim.key : null,
       downloadId: null, downloadDone: false, promptAt: null, at, confirmedAt: null, fileGone: false, removeError: null,
     });
     return null;
@@ -908,12 +889,6 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
     failure = e;
   }
   const needsFlag = !failure && (await installNeedsFlag());
-  // Earlier prompts this one may supersede are judged first (judgeVanished): starts the browser's file check.
-  const sameVersion = (o) => o.token !== token && !o.confirmedAt && o.version === manifest.version && o.downloadDone && o.extensionId === extensionId;
-  if (!failure && (await listInstalls()).some((o) => sameVersion(o) && !o.vanishedAt)) {
-    await chrome.downloads.search({});
-    await sleep(cleanupTiming.settleMs);
-  }
   const end = await withStateLock(async () => {
     let e = await getInstall(token);
     if (!e) return null;
@@ -925,66 +900,44 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
       return null;
     }
     const now = Date.now();
+    // Its prompt is up now; earlier pending entries stay (any of them may still apply).
     e = { ...e, downloadDone: true, promptAt: e.promptAt ?? now };
-    if (needsFlag && !e.confirmedAt && e.startedAt && e.promptAt - e.startedAt < INSTALL_REFUSED_MS) e.refusalCandidate = true;
+    if (needsFlag && !e.confirmedAt && e.version && e.startedAt && e.promptAt - e.startedAt < INSTALL_REFUSED_MS) e.refusalCandidate = true;
     // management.onInstalled may have come first.
     if (e.confirmedAt) e = await deleteCopy(e, { quiet: true });
-    else if (e.version) {
-      // Its prompt is up now and has replaced the earlier ones of this ID and
-      // version, except those that may have been accepted: Chromium may still apply them.
-      for (let o of await listInstalls()) {
-        if (!sameVersion(o)) continue;
-        if (!o.vanishedAt && o.downloadId !== null && !o.fileGone) o = judgeVanished(o, copyGone((await chrome.downloads.search({ id: o.downloadId }))[0]), now);
-        await storeInstall(o.vanishedAt ? o : { ...o, version: null, supersededBy: token, signedWith: null }, now);
-      }
-    }
-    await storeInstall(e, now);
+    await storeInstall(e);
     await deleteReleasedKeys(now);
     return e;
   });
   // Not awaited: the install result does not wait for the cleanup retry.
   if (end && end.confirmedAt && !end.fileGone) retryDeletes([token]).catch((e) => console.error("[Extainium] delete CRX copy:", e));
-  // A quick answer while this page stays open; the sweep judges it otherwise.
-  if (end && needsFlag && !end.confirmedAt && end.version) watchCopy(token).catch((e) => console.error("[Extainium] check install copy:", e));
+  // A quick refusal while this page stays open; the sweep judges it otherwise.
+  if (end && end.refusalCandidate) watchRefusal(token).catch((e) => console.error("[Extainium] check refused install:", e));
   await armSweep();
   await refreshBadge();
   if (failure) throw failure;
-  return { token, promptAt: end ? end.promptAt : null, confirmed: !!(end && end.confirmedAt) };
+  return { token, promptAt: end ? end.promptAt : null, confirmed: !!(end && end.confirmedAt), fromVersion };
 }
 
 // Judges a refusal candidate (see the entry fields) inside the lock, item
 // being its download (downloads.search, after a search started the browser's
 // file check, as in retryDeletes): the copy gone while the install is still
 // unconfirmed means the installer refused it, so installBlocked is recorded
-// (see environment). A confirmed install, a vanished download item, or any
-// install confirmed after the candidate's download completed (installWorkedAt:
-// installs work, newer evidence than the candidate's) ends the candidate; a
-// copy still present leaves it for a later judgement. Returns the entry.
+// (see environment) with the extension's ID.
+// The rule cannot tell a refusal from an Add answered within
+// INSTALL_REFUSED_MS whose update Chromium delays, so any later evidence that
+// an install of that extension worked retracts it (settleInstalled,
+// handleExtensionInstalled). A confirmed or ended install, a download item no
+// longer listed, or any install evidence after the candidate's prompt (installWorkedAt)
+// ends the candidate; a copy still present leaves it for a later judgement.
+// Only the banner depends on the copy, never the entry's state. Returns the entry.
 async function judgeRefusal(e, item) {
   if (!e.refusalCandidate) return e;
   const { installWorkedAt = 0 } = await chrome.storage.local.get("installWorkedAt");
-  if (e.confirmedAt || !item || promptTime(e) <= installWorkedAt) return { ...e, refusalCandidate: false };
+  if (e.confirmedAt || !e.version || !item || promptTime(e) <= installWorkedAt) return { ...e, refusalCandidate: false };
   if (item.exists !== false) return e;
-  await chrome.storage.local.set({ installBlocked: { at: promptTime(e), hint: "flag" } });
+  await chrome.storage.local.set({ installBlocked: { at: promptTime(e), hint: "flag", extensionId: e.extensionId } });
   return { ...e, refusalCandidate: false };
-}
-
-// True when download item (downloads.search) shows its completed file gone.
-const copyGone = (item) => !!item && item.state === "complete" && item.exists === false;
-
-// Judges whether a prompted, unconfirmed entry's copy vanished without an
-// install event (vanishedAt, a hint that the prompt was accepted and Chromium
-// delays the update), gone telling that the copy is gone (copyGone after a
-// started file check, or deleteCopy's foundGone). Chromium's installer deletes
-// the copy once the prompt is accepted, also when it then delays the update,
-// while a dismissed prompt leaves it (crx_installer.cc CleanupTempFiles; seen
-// on ungoogled-chromium 156); an installer failure or anyone else may delete
-// it too, so the browser's version decides later (reconcileInstalls). A copy
-// Extainium removed itself (fileRemoved) and a refusal candidate's copy
-// (judgeRefusal's alone) are never judged here. Returns the entry.
-function judgeVanished(e, gone, now = Date.now()) {
-  if (!gone || e.vanishedAt || e.confirmedAt || !e.version || !e.downloadDone || e.fileRemoved || e.refusalCandidate !== undefined) return e;
-  return { ...e, vanishedAt: now };
 }
 
 // A desktop download that completed within INSTALL_REFUSED_MS of its start
@@ -992,46 +945,46 @@ function judgeVanished(e, gone, now = Date.now()) {
 const completedAtOnce = (item) => item.state === "complete" && !!item.startTime && !!item.endTime
   && Date.parse(item.endTime) - Date.parse(item.startTime) < INSTALL_REFUSED_MS;
 
-// In the hand-off's page on desktop, after the download completed (there it
-// completes once the prompt is answered): judges a refusal candidate
-// (judgeRefusal) or else a vanished copy (judgeVanished) once the browser's
-// file check had time to notice a deleted copy. The sweep judges both as
-// well, for a page that went away and on Android.
-async function watchCopy(token) {
+// When the prompt of a download whose completion the sweep found appeared:
+// the browser's completion time, else (the item is gone) the hand-off's start,
+// the earliest it can have been; never the time the sweep noticed it.
+function completedAt(e, item) {
+  const end = item && item.endTime ? Date.parse(item.endTime) : NaN;
+  return Number.isFinite(end) ? end : e.startedAt ?? e.at;
+}
+
+// In the hand-off's page on desktop, after the download of a refusal
+// candidate completed (there it completes once the prompt is answered): judges
+// it (judgeRefusal) once the browser's file check had time to notice a deleted
+// copy. The sweep judges it as well, for a page that went away.
+async function watchRefusal(token) {
   await sleep(cleanupTiming.retryMs);
   await chrome.downloads.search({});
   await sleep(cleanupTiming.settleMs);
   await withStateLock(async () => {
     const e = await getInstall(token);
-    if (!e || e.confirmedAt || e.downloadId === null) return;
+    if (!e || !e.refusalCandidate || e.downloadId === null) return;
     const [item] = await chrome.downloads.search({ id: e.downloadId });
-    await storeInstall(e.refusalCandidate ? await judgeRefusal(e, item) : judgeVanished(e, copyGone(item)));
+    await storeInstall(await judgeRefusal(e, item));
   });
   await refreshBadge();
 }
 
-// management.onInstalled: confirms the pending install of info.id at
-// info.version that the browser applied (settleInstalled): the newest prompted
-// one whose copy vanished (judged here first: Chromium applies the last
-// accepted prompt), else the newest prompted one (promptOrder; the one still
-// in flight only when none was prompted, none when several are), while its
-// record is still linked to info.id (a file install never relinks a repo).
+// management.onInstalled: the browser installed info.id at info.version. Its
+// pending entries of that version (the prompted ones; the one in flight when
+// none was prompted) are resolved as settleInstalled describes, and any flag
+// banner for that extension is retracted (its install worked).
 export async function handleExtensionInstalled(info) {
   await ready();
   const retry = [];
   await withStateLock(async () => {
     const now = Date.now();
-    const ofVersion = [];
-    for (let e of await ofVersionLocked(info.id, info.version)) {
-      if (e.version && e.downloadDone && !e.fileGone && e.downloadId !== null) {
-        e = judgeVanished(e, copyGone((await chrome.downloads.search({ id: e.downloadId }))[0]), now);
-      }
-      ofVersion.push(e);
-    }
+    const { installBlocked } = await chrome.storage.local.get("installBlocked");
+    if (installBlocked && installBlocked.extensionId === info.id) await chrome.storage.local.remove("installBlocked");
+    const ofVersion = await ofVersionLocked(info.id, info.version);
     const prompted = ofVersion.filter((e) => e.version && e.downloadDone);
     const flying = ofVersion.filter((e) => e.version && !e.downloadDone && inFlight(e, now));
-    const newest = prompted.find((e) => e.vanishedAt) || prompted[0] || (flying.length === 1 ? flying[0] : null);
-    await settleInstalled(info, ofVersion, newest, now, retry);
+    await settleInstalled(info, ofVersion, prompted.length ? prompted : flying, now, retry);
   });
   await refreshBadge();
   await retryDeletes(retry);
@@ -1042,78 +995,111 @@ const ofVersionLocked = async (id, version) => (await listInstalls())
   .filter((e) => e.extensionId === id && !e.confirmedAt && e.installed && e.installed.version === version)
   .sort(promptOrder);
 
-// Inside the lock: confirms entry newest (or none) of ofVersionLocked(info.id,
-// info.version) as installed and commits it to its repo record while that is
-// still linked to info.id. Every other prompted or ended unconfirmed entry of
-// that ID and version (superseded, detached, or older ones a previous version
-// left) ends: its prompt is over. Entries still in flight stay: their prompt
-// is yet to come. A vanished entry of an older version ends too: the browser
-// installed a newer one instead (it applies only the last accepted). The
-// copies of the ended ones are deleted (tokens left to retry go to retry).
-async function settleInstalled(info, ofVersion, newest, now, retry) {
+// What the browser's evidence that it runs version tells about the build:
+// the pending entries that may be the one it installed (applied) name one
+// build: that one; else only the version (the tag when they all name the
+// same), so no digest is ever guessed.
+function appliedBuild(applied, version) {
+  const [first] = applied;
+  const agree = (field) => applied.every((e) => (e.installed[field] ?? null) === (first.installed[field] ?? null));
+  if (agree("tag") && agree("digest")) return first.installed;
+  return { tag: agree("tag") ? first.installed.tag ?? null : null, digest: null, version };
+}
+
+// Inside the lock: the browser's evidence that extension info.id runs
+// info.version (handleExtensionInstalled, reconcileInstalls). applied: the
+// pending entries of that version that may be what it installed (newest
+// prompt first, from ofVersion: ofVersionLocked's). Commits appliedBuild to
+// their records still linked to info.id, records that installs work (no flag
+// banner), and resolves them: one is confirmed when they name one build, the
+// others end. When several were prompted, the newest stays pending: its
+// prompt may still be unanswered while the event came from an earlier
+// accepted one, so only its own later evidence resolves it. Several in
+// flight and none prompted (possible only after pages went away) stay
+// pending too: their prompts are yet to come. Every entry of the extension
+// that stays pending gets fromVersion info.version (a later change from it is
+// new evidence); prompted ones of older versions end (Chromium refuses a
+// downgrade), and the copies of ended entries of this version are deleted
+// (tokens left to retry go to retry).
+async function settleInstalled(info, ofVersion, applied, now, retry) {
+  let resolved = [];
+  if (applied.length) {
+    const installed = appliedBuild(applied, info.version);
+    resolved = !applied[0].downloadDone ? (applied.length === 1 ? applied : []) : applied.length > 1 ? applied.slice(1) : applied;
+    await chrome.storage.local.remove("installBlocked");
+    await chrome.storage.local.set({ installWorkedAt: now });
+    for (const key of new Set(applied.map((e) => e.repoKey).filter(Boolean))) {
+      const record = await findRepo(key);
+      if (record && record.extensionId === info.id) await putRepo({ ...record, installed });
+    }
+    // One build: its newest resolved entry is the confirmed one; else none is.
+    const confirmed = installed === applied[0].installed ? resolved[0] : null;
+    for (let e of resolved) {
+      e = e === confirmed ? { ...e, confirmedAt: now, signedWith: null } : { ...e, version: null, signedWith: null };
+      if (e.refusalCandidate) e.refusalCandidate = false; // installs work (judgeRefusal)
+      if (e.downloadDone && e.downloadId !== null && !e.fileGone) {
+        e = await deleteCopy(e, { quiet: true });
+        if (!e.fileGone) retry.push(e.token);
+      }
+      await storeInstall(e);
+    }
+  }
+  const done = new Set(resolved.map((e) => e.token));
   for (let e of ofVersion) {
-    if (e !== newest && !e.downloadDone && e.version && inFlight(e, now)) continue; // its prompt is yet to come
-    if (e === newest) {
-      e = { ...e, confirmedAt: now, signedWith: null };
-      // Installs work now: no older refusal candidate may report otherwise (judgeRefusal).
-      await chrome.storage.local.remove("installBlocked");
-      await chrome.storage.local.set({ installWorkedAt: now });
-      const record = e.repoKey && (await findRepo(e.repoKey));
-      if (record && record.extensionId === info.id) await putRepo({ ...record, installed: e.installed });
-    } else {
-      e = { ...e, version: null, supersededBy: e.supersededBy || (newest && newest.token), signedWith: null };
-    }
-    if (e.downloadDone && e.downloadId !== null && !e.fileGone) {
-      e = await deleteCopy(e, { quiet: true });
-      if (!e.fileGone) retry.push(e.token);
-    }
-    await storeInstall(e, now);
+    if (done.has(e.token) || e.version || !e.downloadDone || e.downloadId === null || e.fileGone) continue;
+    e = await deleteCopy(e, { quiet: true }); // ended before: its copy goes now
+    if (!e.fileGone) retry.push(e.token);
+    await storeInstall(e);
   }
   for (const e of await listInstalls()) {
-    if (e.extensionId !== info.id || e.confirmedAt || !e.vanishedAt || !e.version || !e.installed) continue;
-    if (orderOrNull(info.version, e.installed.version) > 0) await storeInstall(await endEntry(e), now);
+    if (e.extensionId !== info.id || e.confirmedAt || !e.version || !e.installed) continue;
+    if (e.downloadDone && orderOrNull(info.version, e.installed.version) > 0) await storeInstall(await endEntry(e));
+    else if (e.fromVersion !== info.version) await putInstall({ ...e, fromVersion: info.version });
   }
   await deleteReleasedKeys(now);
 }
 
-// Ends an unconfirmed entry that will not be applied; inside the lock. Its
-// copy (gone already) leaves the download list.
+// Ends a pending entry the browser will not apply; inside the lock. Its copy
+// is deleted (the sweep retries when that fails).
 async function endEntry(e) {
   const ended = { ...e, version: null, signedWith: null };
-  return ended.downloadId !== null && !ended.fileGone ? deleteCopy(ended, { quiet: true }) : ended;
+  return ended.downloadDone && ended.downloadId !== null && !ended.fileGone ? deleteCopy(ended, { quiet: true }) : ended;
 }
 
-// Compares the browser's versions with the vanished entries (vanishedAt): the
-// browser applies a delayed update at its next start without any
+// Compares the browser's versions with the pending entries: the browser
+// applies a delayed update at its next start without any
 // management.onInstalled event (seen on ungoogled-chromium 156). Runs at the
 // browser's start (startedAt: when it started) and with the periodic check.
-// Per extension: a vanished entry whose version is installed now, and was not
-// the installed version at its hand-off (fromVersion; a same-version rebuild
-// is told apart only by its install event), is confirmed as by
-// handleExtensionInstalled (the newest prompt of them, promptOrder). Otherwise
-// a vanished entry ends when its extension is gone or runs a newer version,
-// and at the browser's start when it was prompted before (Chromium applies
-// pending updates while it starts, so one not applied then never applies).
+// Per extension: when its version changed since the hand-off of a prompted
+// entry of that version (fromVersion), the entries of that version are
+// resolved as by an install event (settleInstalled; a same-version rebuild is
+// resolved only by its install event, or together with an entry whose
+// version change shows). Then a prompted pending entry ends when its
+// extension was uninstalled since its hand-off or runs a newer version, and at
+// the browser's start when it was prompted before (Chromium applies pending
+// updates while it starts, so one not applied then never applies).
 export async function reconcileInstalls({ startedAt = null } = {}) {
   await ready();
   const exts = await installedExtensions();
   const retry = [];
   await withStateLock(async () => {
     const now = Date.now();
-    const vanished = (await listInstalls()).filter((e) => e.vanishedAt && !e.confirmedAt && e.version && e.installed);
-    for (const id of new Set(vanished.map((e) => e.extensionId))) {
+    const pending = (await listInstalls()).filter((e) => !e.confirmedAt && e.version && e.installed && e.downloadDone);
+    for (const id of new Set(pending.map((e) => e.extensionId))) {
       const ext = exts.get(id);
-      const mine = vanished.filter((e) => e.extensionId === id).sort(promptOrder);
-      const applied = ext && mine.find((e) => e.version === ext.version && e.fromVersion != null && e.fromVersion !== e.version);
-      if (applied) {
-        const ofVersion = (await ofVersionLocked(id, ext.version)).map((e) => (e.token === applied.token ? applied : e));
-        await settleInstalled({ id, version: ext.version }, ofVersion, applied, now, retry);
+      if (ext) {
+        const ofVersion = await ofVersionLocked(id, ext.version);
+        const prompted = ofVersion.filter((e) => e.version && e.downloadDone);
+        if (prompted.some((e) => e.fromVersion !== undefined && e.fromVersion !== ext.version)) {
+          await settleInstalled({ id, version: ext.version }, ofVersion, prompted, now, retry);
+        }
       }
-      for (const { token } of mine) {
-        const e = await getInstall(token); // settleInstalled may have ended it
+      for (const { token } of pending.filter((e) => e.extensionId === id)) {
+        const e = await getInstall(token); // settleInstalled may have resolved it
         if (!e || e.confirmedAt || !e.version) continue;
-        if (!ext || orderOrNull(ext.version, e.version) > 0 || (startedAt !== null && promptTime(e) < startedAt)) {
-          await storeInstall(await endEntry(e), now);
+        const uninstalled = !ext && e.fromVersion != null;
+        if (uninstalled || (ext && orderOrNull(ext.version, e.version) > 0) || (startedAt !== null && promptTime(e) < startedAt)) {
+          await storeInstall(await endEntry(e));
         }
       }
     }
@@ -1123,25 +1109,23 @@ export async function reconcileInstalls({ startedAt = null } = {}) {
   await retryDeletes(retry);
 }
 
-// Deletes copies of declined prompts and failed installs once their grace
-// period after the prompt passed, retries failed deletions, and forgets
-// finished entries. A hand-off whose page went away before its download ended
-// never records the end; the sweep reads it from the browser (an item no
-// longer listed counts as ended now). It also judges refusal candidates
-// (judgeRefusal) and, for every other entry, vanished copies (judgeVanished)
-// before their copies are deleted, so neither depends on the hand-off's page
-// staying open; a copy found gone while deleting it (a stale file check) is
-// judged too. A download whose end the sweep finds becomes a refusal candidate
-// when it completed at once on desktop. The platform
-// and the candidates are decided under the lock, on the entries read there
-// (an entry may have changed since the snapshot taken before it); the
-// browser's file check is started before the lock for the entries seen then,
-// and a candidate whose copy still shows waits for the next sweep.
+// Deletes copies of prompts once their grace period passed and of failed
+// installs, retries failed deletions, and forgets finished entries. A
+// hand-off whose page went away before its download ended never records the
+// end; the sweep reads it from the browser (completedAt: the browser's
+// completion time is the prompt's). It also judges refusal candidates
+// (judgeRefusal), so that does not depend on the hand-off's page staying
+// open; a download whose end the sweep finds becomes a refusal candidate
+// when it completed at once on desktop. The platform and the candidates are
+// decided under the lock, on the entries read there (an entry may have
+// changed since the snapshot taken before it); the browser's file check is
+// started before the lock for the entries seen then, and a candidate whose
+// copy still shows waits for the next sweep. Pending entries are never ended
+// here (reconcileInstalls).
 export async function sweepDownloads(now = Date.now()) {
   await ready();
   const pending = (await listInstalls()).filter((e) => !e.fileGone && !e.confirmedAt && (e.downloadId !== null || !e.downloadDone));
-  const undecided = (e) => e.downloadDone && e.version && !e.vanishedAt;
-  if (pending.some((e) => e.refusalCandidate || undecided(e)) || (pending.some((e) => !e.downloadDone) && (await installNeedsFlag()))) {
+  if (pending.some((e) => e.refusalCandidate) || (pending.some((e) => !e.downloadDone) && (await installNeedsFlag()))) {
     // Starts the browser's file check, so the searches below see a deleted copy.
     await chrome.downloads.search({});
     await sleep(cleanupTiming.settleMs);
@@ -1168,21 +1152,17 @@ export async function sweepDownloads(now = Date.now()) {
         }
         failed = !!item && item.state === "interrupted";
         if (failed) e = { ...e, version: null, signedWith: null }; // installs nothing
-        e = { ...e, downloadDone: true, promptAt: e.promptAt ?? now };
-        if (!e.confirmedAt && item && completedAtOnce(item) && (needsFlag ??= await installNeedsFlag())) e.refusalCandidate = true;
+        e = { ...e, downloadDone: true, promptAt: e.promptAt ?? completedAt(e, item) };
+        if (!e.confirmedAt && e.version && item && completedAtOnce(item) && (needsFlag ??= await installNeedsFlag())) e.refusalCandidate = true;
       }
-      if (!e.fileGone && (e.refusalCandidate || undecided(e))) {
-        const [item] = await chrome.downloads.search({ id: e.downloadId });
-        e = e.refusalCandidate ? await judgeRefusal(e, item) : judgeVanished(e, copyGone(item), now);
-      }
+      if (!e.fileGone && e.refusalCandidate) e = await judgeRefusal(e, (await chrome.downloads.search({ id: e.downloadId }))[0]);
       const due = e.confirmedAt || failed || now - promptTime(e) >= PENDING_GRACE_MS;
       if (!e.fileGone && due) e = await deleteCopy(e);
-      e = judgeVanished(e, !!e.foundGone, now);
       if (e.fileGone && e.refusalCandidate) e = { ...e, refusalCandidate: false }; // its copy outlived the prompt: not refused
-      await storeInstall(e, now);
+      await storeInstall(e);
     }
     await deleteReleasedKeys(now);
-    // Entries whose copy is gone only wait for a late install event: no sweep needed.
+    // Entries whose copy is gone only wait for the browser's evidence: no sweep needed.
     if ((await listInstalls()).some((e) => !e.fileGone)) await armSweep();
   });
   await refreshBadge();
@@ -1361,16 +1341,19 @@ export const linkInstalledToGithub = operation(async (id, text) => {
   return addSourceRecordNow({ ...newRecord(owner, repo), extensionId: id }, what);
 });
 
-// Runs when this extension starts (runtime.onInstalled, onStartup): an
-// install of Extainium itself that Extainium handed to the browser is
-// confirmed by the new instance, as the old one was replaced before
-// management.onInstalled could reach it. Confirms the pending entry for the
-// running version (handleExtensionInstalled). Returns true when one waited.
-export async function confirmOwnInstall() {
+// runtime.onInstalled of Extainium itself (details): an update of Extainium
+// (reason "update") is the install event of the build Extainium handed to the
+// browser, which the old instance never got (it was replaced before
+// management.onInstalled could reach it): handled as handleExtensionInstalled
+// for the running version. Any other start is no install event; a version
+// that changed since the hand-off is reconcileInstalls's evidence. Returns
+// true when a pending install of that version was resolved.
+export async function confirmOwnInstall(details) {
   await ready();
+  if (!details || details.reason !== "update") return false;
   const id = chrome.runtime.id;
   const { version } = chrome.runtime.getManifest();
-  const waiting = (await listInstalls()).some((e) => e.extensionId === id && !e.confirmedAt && e.installed && e.installed.version === version);
+  const waiting = (await listInstalls()).some((e) => e.extensionId === id && !e.confirmedAt && e.version && e.installed && e.installed.version === version);
   if (waiting) await handleExtensionInstalled({ id, version });
   return waiting;
 }
@@ -1412,7 +1395,8 @@ export const FILE_KEY_CHOICE = "file:";
 // Returns { extensionId, keyPkcs8 (key of an install without a repo, or null),
 // installed, name, token, repoKey: the tracked repo the install belongs to, or
 // null, promptAt: when the browser's prompt appeared (as in trackedView's
-// pendingInstall), confirmed: the browser already reported the install }.
+// pendingInstall), confirmed: the browser already reported the install,
+// fromVersion: the extension's version at the hand-off, or null }.
 export const installFile = operation(async (bytes, filename, signWith) => {
   const crxFile = isCrx(bytes);
   const fileKeyId = !crxFile && signWith && signWith.startsWith(FILE_KEY_CHOICE) ? signWith.slice(FILE_KEY_CHOICE.length) : null;
@@ -1429,12 +1413,12 @@ export const installFile = operation(async (bytes, filename, signWith) => {
   }
   const { crx, extensionId, manifest } = await prepare(bytes, keyPkcs8, filename);
   const installed = { tag: null, digest: null, version: manifest.version };
-  const { token, promptAt, confirmed } = await handOff(crx, {
+  const { token, promptAt, confirmed, fromVersion } = await handOff(crx, {
     repoKey: repo, extensionId, manifest: { ...manifest, name: manifest.name || filename }, installed,
     claim: repo ? { key: repo, keyPkcs8, change: { tag: null, asset: filename } } : null,
     newFileKey: repo || fileKeyId ? null : keyPkcs8,
   });
-  return { extensionId, keyPkcs8: repo ? null : keyPkcs8, installed, name: manifest.name, token, repoKey: repo, promptAt, confirmed };
+  return { extensionId, keyPkcs8: repo ? null : keyPkcs8, installed, name: manifest.name, token, repoKey: repo, promptAt, confirmed, fromVersion };
 });
 
 // The file keys (zips installed from a file without a repo), for the sign-with
@@ -1521,19 +1505,21 @@ export const trackInstalledFile = operation(async (input, fileResult) => {
 // again and stays in exports) unless uninstall is set: then the extension is
 // uninstalled (the browser asks the user; a refusal throws and changes nothing)
 // and the key is marked for deletion. It is deleted at once when no pending
-// install signed with it remains, else once those are confirmed, superseded,
+// install signed with it remains, else once those are confirmed, ended,
 // failed or past PENDING_GRACE_MS (handleExtensionInstalled, handOff,
 // sweepDownloads); until then it stays, and is exported. Removing Extainium's
-// own record opts out of trackSelf for good.
+// own record opts out of trackSelf for good: the opt-out is written first, in
+// the same locked step, so a removal that stops halfway keeps the record or
+// the opt-out, never neither.
 export const removeRepo = operation(async (key, uninstall) => {
   const record = await getRepo(key);
   if (uninstall && record.extensionId && (await installedExtensions()).has(record.extensionId)) {
     await chrome.management.uninstall(record.extensionId, { showConfirmDialog: true });
   }
   await withStateLock(async () => {
-    await removeRepoRecord(key);
     // Extainium's own record, however created: the user opted out of trackSelf.
     if (record.extensionId === chrome.runtime.id) await chrome.storage.local.set({ [SELF_OPT_OUT]: Date.now() });
+    await removeRepoRecord(key);
     // Its pending installs end with it (their copies are still deleted).
     for (const e of await listInstalls()) if (e.repoKey === key) await storeInstall(detached(e));
     if (uninstall && (await getSigningKey(key))) {

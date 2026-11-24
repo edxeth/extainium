@@ -95,7 +95,8 @@ The same hand-off installs on desktop ungoogled-chromium only with
 install" (then relaunch). Without it the download completes and nothing
 installs; Extainium notices that (the browser deletes the copy at once) and
 says so, also when the page that started the install was closed meanwhile
-(the background clean-up checks it). ungoogled-chromium does not update extensions by itself, so track
+(the background clean-up checks it). An **Add** answered within moments looks
+the same, so the hint disappears as soon as the browser reports that install. ungoogled-chromium does not update extensions by itself, so track
 store and self-hosted extensions from the **Installed** list. Extainium tracks
 itself through its own update address there (remove its card to stop that for
 good); on Titanium the browser updates Extainium.
@@ -103,14 +104,16 @@ good); on Titanium the browser updates Extainium.
 Chromium waits with an update of an extension that is running (its background
 worker or one of its pages is active): after **Add extension** it says the
 extension was added, but the old version keeps running until the extension
-stops, at the latest until the browser restarts. The browser then deletes the
-downloaded file without reporting the new version, which also happens when an
-install fails, so Extainium cannot tell which it was. Its card then says
-**Waiting for Chromium**: "If you clicked Add, Chromium applies <version> when
-<name> restarts, at the latest after a browser restart. If you cancelled,
-install again.", with **Install again**. It marks the update done only once
-the browser reports the new version; after a browser restart without it, the
-card offers the update again. Extainium never turns other extensions off or on.
+stops, at the latest until the browser restarts, without reporting the new
+version. A cancelled prompt or a failed install reports nothing either, so
+after the prompt Extainium's card says **Not applied yet**: "Chromium has not
+applied <version> yet. If you clicked Add, it applies when <name> restarts, at
+the latest after a browser restart. If you cancelled, install again.", with
+**Install again**. It marks the update done only once the browser reports the
+install or the new version; after a browser restart without it, the card
+offers the update again. When two different builds of one version wait, the
+browser's report does not say which one it installed, so Extainium records
+only the version. Extainium never turns other extensions off or on.
 
 ### How the install works on Titanium
 

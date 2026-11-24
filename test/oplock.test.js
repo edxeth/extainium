@@ -187,9 +187,10 @@ test("an install started while the first hand-off waits for its download ID wait
   assert.equal((await page.trackedView())[0].pendingInstall.tag, "v2", "the second prompt is pending now");
 });
 
-// F2 (closure review): with several entries in flight and none prompted (only
-// possible after a page went away), the event names no build: none is credited.
-test("an install event while several hand-offs of the version are in flight and none was prompted confirms none", async () => {
+// F2 (closure review), final round: with several entries in flight and none
+// prompted (only possible after a page went away), the event names no build:
+// only the version is recorded, and none is resolved (their prompts are yet to come).
+test("an install event while several hand-offs of the version are in flight and none was prompted records only the version and resolves none", async () => {
   const id = "a".repeat(32);
   const env = profile();
   Object.assign(env.store, { schema: 2, "repo:o/r": { ...newRecord("o", "r"), extensionId: id } });
@@ -204,13 +205,13 @@ test("an install event while several hand-offs of the version are in flight and 
   }
   env.install(id, "1.0");
   await worker.handleExtensionInstalled({ id, version: "1.0" });
-  assert.equal(env.store["repo:o/r"].installed, null, "nothing committed");
+  assert.deepEqual(env.store["repo:o/r"].installed, { tag: null, digest: null, version: "1.0" }, "the version only, no build");
   assert.deepEqual(["t1", "t2"].map((t) => [env.store["install:" + t].confirmedAt, env.store["install:" + t].version]), [[null, "1.0"], [null, "1.0"]]);
 });
 
 // ---- F11: one prompt clock for the lib and the UI ----
 
-test("the view's pending install carries the prompt time; isPromptWaiting uses it, and a download in progress is still waiting", async () => {
+test("the view's pending install carries the prompt time, null while the download is in progress", async () => {
   const id = "a".repeat(32);
   const env = profile();
   const now = Date.now();
@@ -223,12 +224,9 @@ test("the view's pending install carries the prompt time; isPromptWaiting uses i
   // F11 repro (pending-ui-clock): a slow download completed just now.
   let pending = (await page.trackedView())[0].pendingInstall;
   assert.equal(pending.promptAt, now);
-  assert.equal(page.isPromptWaiting(pending, now + 1000), true, "a fresh prompt is not expired");
-  assert.equal(page.isPromptWaiting(pending, now + page.PENDING_GRACE_MS), false);
   env.store["install:t"] = { ...entry, downloadDone: false, promptAt: null };
   pending = (await page.trackedView())[0].pendingInstall;
   assert.equal(pending.promptAt, null, "still downloading");
-  assert.equal(page.isPromptWaiting(pending, now + 10 * page.PENDING_GRACE_MS), true);
 });
 
 // ---- F12: one owner per key ----
@@ -333,7 +331,6 @@ test("installFile reports when the prompt appeared, and whether the browser alre
   const r = await page.installFile(zip, "local.zip", null);
   assert.equal(r.confirmed, false);
   assert.ok(r.promptAt >= t0 && r.promptAt <= Date.now(), "the prompt time");
-  assert.equal(page.isPromptWaiting(r), true);
   // Chromium may report the install before download() resolves.
   const fresh = profile();
   fakeGithub([]);
@@ -354,7 +351,8 @@ test("installFile reports when the prompt appeared, and whether the browser alre
 // network calls. Invariants: a key is stored in at most one place; a key that
 // signed a pending install (in flight or within the prompt's grace period) is
 // stored; each install event confirms at most one entry, and a repo's
-// installed build is one handed off for it.
+// installed build is one handed off for it, or only the version an event
+// reported (no digest) when the event could not name the build.
 test("property: random mixes of operations, install events and sweeps keep the key and confirmation invariants", async () => {
   const R = newPkcs8();
   const contexts = [page, popup, worker];
@@ -449,6 +447,7 @@ test("property: random mixes of operations, install events and sweeps keep the k
         if (!n.startsWith("repo:") || !rec.installed) continue;
         // Tracking the file install takes over its confirmed build.
         if (rec.extensionId === f.extensionId && JSON.stringify(rec.installed) === JSON.stringify(f.installed)) continue;
+        if (rec.installed.digest === null && rec.installed.tag === null && rec.installed.version === "1.0" && events.includes(rec.extensionId)) continue;
         const key = n.slice("repo:".length);
         const handed = [...entries.values()].flat().filter((e) => e.installed && JSON.stringify(e.installed) === JSON.stringify(rec.installed));
         assert.ok(handed.some((e) => e.repoKey === key || e.extensionId === rec.extensionId), `${key}: installed ${JSON.stringify(rec.installed)} was handed off for it`);

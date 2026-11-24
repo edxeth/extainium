@@ -1,13 +1,14 @@
-// Updates whose downloaded copy vanished without an install event. Observed on
-// ungoogled-chromium 156 and in a throwaway-profile experiment: after "Add
-// extension" the installer deletes the downloaded CRX, but a running extension
-// keeps its old version and management.onInstalled fires only once the
-// extension's processes are gone; after a browser restart the version changes
-// without any event. A dismissed prompt leaves the CRX in place. An installer
-// failure deletes the copy too (crx_installer.cc CleanupTempFiles), so a
-// vanished copy is only a hint (owner decision, closure review 2026-11-24): the
-// card says "Waiting for Chromium", keeps the install button, and turns current
-// only when the browser reports the version.
+// Hand-offs the browser has not confirmed. Observed on ungoogled-chromium 156
+// and in a throwaway-profile experiment: after "Add extension" the installer
+// deletes the downloaded CRX, but a running extension keeps its old version and
+// management.onInstalled fires only once its processes are gone; after a
+// browser restart the version changes without any event. A dismissed prompt
+// leaves the CRX, an installer failure deletes it too, and Chromium's file
+// checks are throttled, so the copy says nothing about the answer (owner
+// decision, final round 2026-11-24): every unconfirmed hand-off after its
+// prompt is "Not applied yet" with Install again; only the browser's evidence
+// (an install event, or a version change since the hand-off) resolves it, and
+// a browser start ends what it did not apply.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -96,72 +97,57 @@ function answerPrompt(env, { accept }) {
 const entries = (env) => Object.values(env.store).filter((v) => v && v.token);
 const entryOf = (env, tag) => entries(env).find((e) => e.installed.tag === tag);
 
-async function vanishedUpdate(opts) {
+const DAY = 24 * 60 * 60 * 1000;
+
+// A hand-off of release tag (default: the latest) whose prompt the user answers (answerPrompt).
+async function promptedUpdate(opts = {}, { accept = true, tag } = {}) {
   const s = await updateSetup(opts);
-  answerPrompt(s.env, { accept: true });
-  await installRelease(K);
-  await sleep(30); // the page's check of the copy (cleanupTiming)
+  answerPrompt(s.env, { accept });
+  await installRelease(K, tag);
+  await sleep(30); // the page's check of a refusal candidate (cleanupTiming)
   return s;
 }
 
-// Owner decision 2 (F5): a vanished copy is a tentative "Waiting for Chromium" that keeps the install offered.
-test("a copy that vanished without an install event shows Waiting for Chromium, still offers the install, and stays past the grace period and the confirmation window", async () => {
-  const { env } = await vanishedUpdate();
-  let [view] = await trackedView();
-  assert.deepEqual([view.state, view.pendingInstall.version, view.pendingInstall.waiting], ["waiting", "1.0", true]);
-  assert.equal(offersInstall(view), true, "the prompt may have been cancelled: install again stays possible");
-  assert.equal(env.badge, "", "not counted as an update to install");
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  await sweepDownloads(Date.now() + manager.CONFIRM_WINDOW_MS + 1);
-  [view] = await trackedView();
-  assert.deepEqual([view.state, view.pendingInstall.waiting], ["waiting", true], "kept: Chromium may apply it at its restart");
+// Owner decision 1: one neutral state after the prompt, whatever happened to the copy.
+test("an unconfirmed hand-off after its prompt is Not applied yet with Install again, whether its copy was deleted or kept, past the grace period and days later", async () => {
+  for (const accept of [true, false]) {
+    const { env } = await promptedUpdate({}, { accept });
+    let [view] = await trackedView();
+    assert.deepEqual([view.state, view.pendingInstall.version, offersInstall(view)], ["not-applied", "1.0", true], "accept " + accept);
+    assert.equal(env.badge, "", "not counted as an update to install");
+    await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
+    await sweepDownloads(Date.now() + 3 * DAY);
+    [view] = await trackedView();
+    assert.deepEqual([view.state, view.pendingInstall.version], ["not-applied", "1.0"], "kept until browser evidence or a browser start, accept " + accept);
+    assert.deepEqual(entries(env).map((e) => [e.version, e.confirmedAt]), [["1.0", null]]);
+    assert.deepEqual(Object.keys(entries(env)[0]).filter((k) => /vanish|foundGone|fileRemoved/.test(k)), [], "no file-based classification is stored");
+  }
 });
 
-// Requirement: keep the dismissed handling for real declines (the copy stays).
-test("a dismissed prompt leaves the copy and stays an update; deleting the copy later does not make it waiting", async () => {
-  const { env } = await updateSetup();
+// F6 (closure repro "idempotent desktop"): the copy is only Extainium's to delete, never evidence.
+test("file checks never decide the state: a stale check and a delete that reports success for a missing file leave the entry pending until browser evidence", async () => {
+  const { env, key, crx } = await updateSetup();
   answerPrompt(env, { accept: false });
   await installRelease(K);
-  await sleep(30);
-  let [view] = await trackedView();
-  assert.deepEqual([view.state, view.pendingInstall.waiting], ["update", false]);
+  env.files.get(1).exists = false; // deleted by someone; the browser's throttled check has not noticed
+  const search = chrome.downloads.search;
+  chrome.downloads.search = async (q) => (await search(q)).map((i) => ({ ...i, exists: true }));
+  chrome.downloads.removeFile = async () => {}; // desktop DeleteFile reports success for a missing path
   await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  assert.deepEqual(env.removed, [1], "Extainium deleted the declined copy");
-  await sweepDownloads(Date.now() + 2 * manager.PENDING_GRACE_MS);
-  [view] = await trackedView();
-  assert.equal(view.state, "update");
-  assert.ok(!view.pendingInstall || !view.pendingInstall.waiting);
-});
-
-// A copy Extainium deleted itself never counts as vanished.
-test("a declined copy that Extainium deleted but could not erase from the download list is not taken for a vanished one", async () => {
-  const { env } = await updateSetup({ platform: "android" });
-  await installRelease(K);
-  const erase = chrome.downloads.erase;
-  chrome.downloads.erase = async () => { throw new Error("erase failed"); };
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  chrome.downloads.erase = erase;
-  assert.deepEqual([env.removed, env.files.get(1).exists], [[1], false], "deleted, still listed");
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 2);
+  chrome.downloads.search = search;
+  await sweepDownloads(Date.now() + 3 * DAY);
+  const [e] = entries(env);
+  assert.deepEqual([e && e.version, e && e.confirmedAt, e && e.fileGone], ["1.0", null, true], "kept, its copy cleaned up");
+  assert.equal((await trackedView())[0].state, "not-applied");
+  env.install(key.id, "1.0"); // applied while the browser started, no event
+  await reconcileInstalls({ startedAt: Date.now() + 1 });
   const [view] = await trackedView();
-  assert.ok(!view.pendingInstall || !view.pendingInstall.waiting);
-  assert.equal(view.state, "update");
+  assert.deepEqual([view.state, view.record.installed], ["current", { tag: "v1", digest: sha256(crx), version: "1.0" }]);
+  assert.deepEqual(entries(env), []);
 });
 
-// The sweep judges the copy when no page checked it, on Android too.
-test("the sweep finds a vanished copy when no page checked it", async () => {
-  const { env } = await updateSetup({ platform: "android" });
-  await installRelease(K);
-  assert.equal((await trackedView())[0].pendingInstall.waiting, false);
-  env.files.get(1).exists = false; // accepted at the prompt later; the installer deleted the copy
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  const [view] = await trackedView();
-  assert.deepEqual([view.state, view.pendingInstall.waiting], ["waiting", true]);
-  assert.deepEqual(env.removed, [], "the browser's installer deleted the copy, not Extainium");
-});
-
-test("the install event of the waiting version commits it and ends the entry", async () => {
-  const { env, key, crx } = await vanishedUpdate();
+test("the install event of the pending version commits it and ends the entry", async () => {
+  const { env, key, crx } = await promptedUpdate();
   env.install(key.id, "1.0");
   await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
   const [view] = await trackedView();
@@ -171,11 +157,11 @@ test("the install event of the waiting version commits it and ends the entry", a
   assert.deepEqual(entries(env), []);
 });
 
-// Owner decision 2: a startup or periodic comparison that sees the version installed resolves it to current.
-test("a comparison after a browser restart commits a waiting update the browser applied without an event", async () => {
-  const { env, key, crx } = await vanishedUpdate();
+// Owner decision 2: a version that changed since the hand-off resolves it, without an event.
+test("a comparison after a browser restart commits a pending update the browser applied without an event", async () => {
+  const { env, key, crx } = await promptedUpdate();
   await reconcileInstalls();
-  assert.equal((await trackedView())[0].state, "waiting", "not applied yet: nothing changes");
+  assert.equal((await trackedView())[0].state, "not-applied", "not applied yet: nothing changes");
   env.install(key.id, "1.0"); // applied while the browser started
   await reconcileInstalls({ startedAt: Date.now() + 1 });
   const [view] = await trackedView();
@@ -185,22 +171,25 @@ test("a comparison after a browser restart commits a waiting update the browser 
 });
 
 // Chromium applies pending updates while it starts: one prompted before the start and not applied never applies.
-test("a browser start without the version ends the waiting entry; a periodic comparison and an entry prompted after the start keep it", async () => {
-  const { env } = await vanishedUpdate();
-  const [{ promptAt }] = entries(env);
-  await reconcileInstalls();
-  await reconcileInstalls({ startedAt: promptAt });
-  assert.equal((await trackedView())[0].state, "waiting");
-  await reconcileInstalls({ startedAt: promptAt + 1 });
-  const [view] = await trackedView();
-  assert.deepEqual([view.state, view.pendingInstall], ["update", null]);
-  assert.equal(view.record.installed.version, "0.9");
-  assert.deepEqual(entries(env), []);
+test("a browser start without the version ends the pending entry and offers the update again; a periodic comparison and an entry prompted after the start keep it", async () => {
+  for (const accept of [true, false]) {
+    const { env } = await promptedUpdate({}, { accept });
+    const [{ promptAt }] = entries(env);
+    await reconcileInstalls();
+    await reconcileInstalls({ startedAt: promptAt });
+    assert.equal((await trackedView())[0].state, "not-applied");
+    await reconcileInstalls({ startedAt: promptAt + 1 });
+    const [view] = await trackedView();
+    assert.deepEqual([view.state, view.pendingInstall], ["update", null]);
+    assert.equal(view.record.installed.version, "0.9");
+    assert.equal(env.badge, "1", "offered again");
+    assert.deepEqual(entries(env), []);
+  }
 });
 
-test("a comparison ends a waiting entry whose extension was uninstalled or runs a newer version, without committing it", async () => {
+test("a comparison ends a pending entry whose extension was uninstalled or runs a newer version, without committing it; a first install waits for the extension", async () => {
   for (const change of ["uninstalled", "newer"]) {
-    const { env, key } = await vanishedUpdate();
+    const { env, key } = await promptedUpdate();
     if (change === "uninstalled") env.extensions = [];
     else env.install(key.id, "1.5");
     await reconcileInstalls();
@@ -209,75 +198,80 @@ test("a comparison ends a waiting entry whose extension was uninstalled or runs 
     assert.equal(view.record.installed.version, "0.9", change);
     assert.deepEqual(entries(env), [], change);
   }
+  // Not installed at the hand-off: its prompt may still be answered.
+  const { env, key, crx } = await updateSetup({ platform: "android" });
+  env.extensions = [];
+  await installRelease(K);
+  await reconcileInstalls();
+  assert.deepEqual(entries(env).map((e) => [e.fromVersion, e.version]), [[null, "1.0"]]);
+  env.install(key.id, "1.0");
+  await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
+  assert.deepEqual((await trackedView())[0].record.installed, { tag: "v1", digest: sha256(crx), version: "1.0" });
 });
 
 // Observed: two accepted updates while delayed; Chromium applies only the newest (one install event).
-test("the install event of a newer version also ends an older waiting entry of that extension", async () => {
-  const { env, key } = await vanishedUpdate();
+test("the install event of a newer version also ends an older pending entry of that extension", async () => {
+  const { env, key } = await promptedUpdate();
   env.install(key.id, "1.1");
   await manager.handleExtensionInstalled({ id: key.id, version: "1.1" });
   assert.equal((await trackedView())[0].pendingInstall, null);
   assert.deepEqual(entries(env), []);
 });
 
-// F4: a refusal candidate's deleted copy is judged once, as a refusal, never also as a waiting update.
-test("a refused desktop install whose copy the browser deleted sets installBlocked and never becomes waiting", async () => {
-  // Judged by the sweep (the page went away).
-  const s = await updateSetup();
-  const now = Date.now();
-  s.env.store["install:t"] = {
-    token: "t", repoKey: K, extensionId: s.key.id, version: "1.0", installed: { tag: "v1", digest: sha256(s.crx), version: "1.0" },
-    crxHash: "x", fromVersion: "0.9", signedWith: null, supersededBy: null, downloadId: 1, startedAt: now - 10000, downloadDone: true,
-    promptAt: now - 9990, at: now - 10000, confirmedAt: null, fileGone: false, removeError: null, refusalCandidate: true,
-  };
-  s.env.files.set(1, { filename: "x", state: "complete", exists: false, startTime: new Date(now - 10000).toISOString(), endTime: new Date(now - 9990).toISOString() });
-  await sweepDownloads();
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  assert.equal(s.env.store.installBlocked.hint, "flag");
-  assert.equal(s.env.store["install:t"].vanishedAt, undefined);
-  assert.equal((await trackedView())[0].state, "update");
-  // Judged by the page's check first, then swept.
-  const p = await updateSetup();
-  p.env.onDownloadStarted = async (id) => { p.env.files.get(id).exists = false; }; // completed at once, copy deleted
-  await installRelease(K);
-  await sleep(30);
-  assert.equal(p.env.store.installBlocked.hint, "flag");
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  assert.ok(entries(p.env).every((e) => !e.vanishedAt));
-  assert.deepEqual([(await trackedView())[0].state, (await trackedView())[0].pendingInstall.waiting], ["update", false]);
+// F9 + F7 (closure repros "stale file check must not supersede", "event cannot prefer"):
+// a later hand-off ends nothing, and an event names a version, not a build.
+test("a later hand-off of the same version never ends an earlier one; their install event records the version without a digest and keeps the newest prompt pending", async () => {
+  for (const stale of [false, true]) {
+    const { env, key } = await twoBuilds({ platform: "android" });
+    await installRelease(K, "v1");
+    env.files.get(1).exists = false; // accepted (or its install failed); Chromium delays it
+    const search = chrome.downloads.search;
+    if (stale) chrome.downloads.search = async (q) => (await search(q)).map((i) => ({ ...i, exists: true }));
+    await sleep(2);
+    await installRelease(K, "v2"); // its prompt shows now; it may be dismissed or still open
+    await sweepDownloads();
+    chrome.downloads.search = search;
+    assert.deepEqual([entryOf(env, "v1").version, entryOf(env, "v2").version], ["1.0", "1.0"], "the later hand-off ends nothing");
+    assert.equal((await trackedView())[0].pendingInstall.tag, "v2", "the newest prompt shows");
+    env.install(key.id, "1.0");
+    await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
+    const [view] = await trackedView();
+    assert.deepEqual(view.record.installed, { tag: null, digest: null, version: "1.0" }, "either build may run: no digest is guessed");
+    assert.deepEqual([entryOf(env, "v1"), entryOf(env, "v2").version, entryOf(env, "v2").fromVersion], [undefined, "1.0", "1.0"],
+      "the newest prompt may still be unanswered; from now on only its own install event resolves it");
+    assert.equal(view.pendingInstall.tag, "v2");
+  }
 });
 
-// F6: Chromium's file check is throttled (once per 10 s): the copy may still show while it is gone.
-test("a sweep that deletes a copy the stale file check still lists finds it gone and keeps the entry as waiting", async () => {
-  const { env } = await updateSetup({ platform: "android" });
-  await installRelease(K);
-  env.files.get(1).exists = false; // the installer deleted it
-  const search = chrome.downloads.search;
-  chrome.downloads.search = async (q) => (await search(q)).map((i) => ({ ...i, exists: true })); // not noticed yet
-  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1);
-  chrome.downloads.search = search;
-  const [e] = entries(env);
-  assert.ok(e.vanishedAt, "removeFile said it was deleted already");
-  assert.deepEqual(env.removed, []);
-  await sweepDownloads(Date.now() + manager.CONFIRM_WINDOW_MS + 1);
-  assert.equal((await trackedView())[0].state, "waiting");
+// F7 (closure repro "version change alone"): a version change does not name the build either.
+test("a version change with two builds of that version pending records the version without a digest", async () => {
+  const { env, key } = await twoBuilds({ platform: "android" });
+  await installRelease(K, "v1");
+  env.files.get(1).exists = false; // v1 accepted
+  await sleep(2);
+  await installRelease(K, "v2");
+  env.files.get(2).exists = false; // v2's install failed: its copy is deleted as well
+  await sweepDownloads();
+  env.install(key.id, "1.0"); // the browser applied v1 at its start, without an event
+  await reconcileInstalls({ startedAt: Date.now() + 1 });
+  const [view] = await trackedView();
+  assert.deepEqual(view.record.installed, { tag: null, digest: null, version: "1.0" });
+  assert.deepEqual(entries(env).filter((e) => e.version && !e.confirmedAt), [], "the browser start ends both");
 });
 
 // F7: a same-version rebuild is not proven applied by the version alone; its install event decides (digest rule).
-test("a waiting rebuild of the installed version is not committed by a version comparison; its install event commits it", async () => {
+test("a pending rebuild of the installed version is not committed by a version comparison; its install event commits it; a browser start without it offers it again", async () => {
   const { env, key, builds } = await twoBuilds({ version: "1.0" });
   answerPrompt(env, { accept: true });
   await installRelease(K); // v2, the rebuild
   await sleep(30);
-  assert.equal((await trackedView())[0].state, "waiting");
+  assert.equal((await trackedView())[0].state, "not-applied");
   await reconcileInstalls();
   let [view] = await trackedView();
-  assert.deepEqual([view.state, view.record.installed.digest], ["waiting", sha256(builds.v1)]);
-  manager.handleExtensionInstalled({ id: key.id, version: "1.0" }).catch(() => {});
-  await sleep(30);
+  assert.deepEqual([view.state, view.record.installed.digest], ["not-applied", sha256(builds.v1)]);
+  await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
   [view] = await trackedView();
   assert.deepEqual([view.state, view.record.installed.digest], ["current", sha256(builds.v2)], "the event commits the rebuild");
-  // After a restart, the comparison cannot tell: the entry ends, the card offers the rebuild again.
   const s = await twoBuilds({ version: "1.0" });
   answerPrompt(s.env, { accept: true });
   await installRelease(K);
@@ -287,103 +281,90 @@ test("a waiting rebuild of the installed version is not committed by a version c
   assert.deepEqual([view.state, view.record.installed.digest, view.pendingInstall], ["update", sha256(s.builds.v1), null]);
 });
 
-// F9: a later dismissed hand-off never discards an earlier one that may have been accepted.
-test("a later dismissed hand-off of the same version keeps the earlier vanished one, which its install event commits", async () => {
-  const { env, key, builds } = await twoBuilds({ platform: "android" });
+// F7 (closure repro "self startup"): a start of Extainium is no install event.
+test("Extainium's own pending rebuild is confirmed by its runtime update event, never by a plain start", async () => {
+  const { env, key, builds } = await twoBuilds({ platform: "android", version: "1.0" });
+  env.runtimeId = key.id;
+  env.manifestVersion = "1.0";
+  await installRelease(K, "v2");
+  env.files.get(1).exists = false; // failed, or still waiting
+  assert.equal(await manager.confirmOwnInstall({ reason: "chrome_update" }), false);
+  assert.equal(await manager.confirmOwnInstall(undefined), false);
+  assert.equal((await trackedView())[0].record.installed.digest, sha256(builds.v1), "a start is not an install event");
+  assert.equal(await manager.confirmOwnInstall({ reason: "update", previousVersion: "1.0" }), true);
+  assert.equal((await trackedView())[0].record.installed.digest, sha256(builds.v2), "the new instance's update event is its install event");
+});
+
+// F8 (closure repro "sweep must order"): prompt times come from the browser, never from the sweep's clock.
+test("a completion the sweep recovers keeps the browser's completion time as its prompt time, for the order and the browser start", async () => {
+  const { env } = await twoBuilds({ platform: "android" });
   await installRelease(K, "v1");
-  env.files.get(1).exists = false; // accepted; Chromium delays it (no sweep judged it yet)
-  await installRelease(K, "v2"); // its prompt is dismissed: the copy stays
-  assert.equal(entryOf(env, "v1").version, "1.0", "not superseded");
-  assert.ok(entryOf(env, "v1").vanishedAt);
-  let [view] = await trackedView();
-  assert.equal(view.pendingInstall.tag, "v2", "the open prompt shows first");
-  for (const e of entries(env)) { // the grace period of both prompts passed, in their order
-    env.store["install:" + e.token] = { ...e, at: e.at - manager.PENDING_GRACE_MS - 1, promptAt: e.promptAt - manager.PENDING_GRACE_MS - 1 };
-  }
+  const old = entryOf(env, "v1");
+  env.store["install:" + old.token] = { ...old, downloadDone: false, promptAt: null }; // its page went away before recording the completion
+  await sleep(5);
+  await installRelease(K, "v2");
+  await sleep(5);
   await sweepDownloads();
-  [view] = await trackedView();
-  assert.deepEqual([view.pendingInstall.tag, view.pendingInstall.waiting, view.state], ["v1", true, "update"]);
-  env.install(key.id, "1.0");
-  await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
-  [view] = await trackedView();
-  assert.equal(view.record.installed.digest, sha256(builds.v1), "the accepted build, not the dismissed one");
-  assert.equal(view.pendingInstall, null);
+  const recovered = entryOf(env, "v1");
+  assert.equal(recovered.promptAt, Date.parse(env.files.get(1).endTime));
+  assert.equal((await trackedView())[0].pendingInstall.tag, "v2", "the newest prompt");
+  await reconcileInstalls({ startedAt: entryOf(env, "v2").promptAt });
+  assert.deepEqual([entryOf(env, "v1"), entryOf(env, "v2").version], [undefined, "1.0"], "prompted before the start: ended; after it: kept");
 });
 
-// F8: the order is the prompts' order, not the order Extainium noticed the copies vanish.
-test("of several vanished hand-offs, the newest prompt is shown and committed, whatever order they were detected in", async () => {
-  for (const how of ["event", "restart"]) {
-    const { env, key, builds } = await twoBuilds({ platform: "android" });
-    await installRelease(K, "v1");
-    env.files.get(1).exists = false;
-    await installRelease(K, "v2");
-    env.files.get(2).exists = false;
-    await sweepDownloads();
-    // Detected the other way round: v2 first.
-    const a = entryOf(env, "v1"), b = entryOf(env, "v2");
-    env.store["install:" + a.token] = { ...a, vanishedAt: b.promptAt + 10 };
-    env.store["install:" + b.token] = { ...b, vanishedAt: a.promptAt };
-    assert.equal((await trackedView())[0].pendingInstall.tag, "v2", how);
-    env.install(key.id, "1.0");
-    if (how === "event") await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
-    else await reconcileInstalls({ startedAt: Date.now() + 1 });
-    const [view] = await trackedView();
-    assert.deepEqual([view.state, view.record.installed.digest], ["current", sha256(builds.v2)], how);
+// F5: the refusal rule stays; any later evidence that an install of that extension worked retracts its banner.
+test("a quick Add on desktop may raise the flag banner, but the install's event, its version change or any later install event of that extension retracts it", async () => {
+  for (const how of ["event", "restart", "later event"]) {
+    const { env, key } = await updateSetup();
+    env.onDownloadStarted = async (id) => { env.files.get(id).exists = false; }; // answered within INSTALL_REFUSED_MS; the update waits
+    await installRelease(K);
+    await sleep(30);
+    assert.equal(env.store.installBlocked && env.store.installBlocked.hint, "flag", how);
+    assert.equal((await trackedView())[0].state, "not-applied", how);
+    if (how === "event") {
+      env.install(key.id, "1.0");
+      await manager.handleExtensionInstalled({ id: key.id, version: "1.0" });
+    } else if (how === "restart") {
+      env.install(key.id, "1.0");
+      await reconcileInstalls({ startedAt: Date.now() + 1 });
+    } else {
+      await reconcileInstalls({ startedAt: Date.now() + 1 }); // not applied: the entry ends
+      assert.deepEqual(entries(env), [], how);
+      env.install(key.id, "1.1");
+      await manager.handleExtensionInstalled({ id: key.id, version: "1.1" });
+    }
+    assert.equal(env.store.installBlocked, undefined, how);
   }
 });
 
-// "At the latest after a browser restart": what Chromium did not apply while starting ends, also next to one it applied.
-test("a browser start that applied one vanished update ends the other vanished updates of that extension", async () => {
-  const key = await crxKey();
-  const builds = { v1: await packCrx3(zip, key.pkcs8), v3: await packCrx3(await versionZip("2.0"), key.pkcs8) };
-  const { env } = await updateSetup({ platform: "android", key, builds });
-  await installRelease(K, "v3");
-  env.files.get(1).exists = false;
-  await installRelease(K, "v1"); // accepted last: Chromium applies this one
-  env.files.get(2).exists = false;
-  await sweepDownloads();
-  env.install(key.id, "1.0");
-  await reconcileInstalls({ startedAt: Date.now() + 1 });
-  const [view] = await trackedView();
-  assert.deepEqual([view.record.installed.tag, view.state, view.pendingInstall], ["v1", "update", null]);
-  assert.deepEqual(entries(env).filter((e) => e.version && !e.confirmedAt), []);
-});
-
-// F11: the badge follows every change of a pending install.
-test("the badge drops an update once its copy vanished, found by the page's check or by the sweep", async () => {
+// F11: the badge counts the updates offered; Not applied yet is not one.
+test("the badge drops an update once its prompt showed and counts it again when a browser start ends it", async () => {
   for (const platform of ["desktop", "android"]) {
     const { env } = await updateSetup({ platform });
     await manager.refreshBadge();
     assert.equal(env.badge, "1", platform);
-    if (platform === "desktop") {
-      answerPrompt(env, { accept: true });
-      await installRelease(K);
-      await sleep(30);
-    } else {
-      await installRelease(K);
-      env.files.get(1).exists = false;
-      await sweepDownloads();
-    }
-    assert.equal((await trackedView())[0].state, "waiting", platform);
-    assert.equal(env.badge, "", platform);
+    await installRelease(K);
+    await sleep(30);
+    assert.deepEqual([(await trackedView())[0].state, env.badge], ["not-applied", ""], platform);
+    await reconcileInstalls({ startedAt: Date.now() + 1 });
+    assert.deepEqual([(await trackedView())[0].state, env.badge], ["update", "1"], platform);
   }
 });
 
-// F12 (lib side): an install from a file is followed until the browser confirms it.
-test("handOffState tells a file install's waiting, pending and confirmed states apart, also confirmed without an event", async () => {
+// F12 (lib side): an install from a file follows the same rules.
+test("handOffState is pending for every unconfirmed file install after its prompt, confirmed by evidence, and null once ended", async () => {
   const { env, key, crx } = await updateSetup();
   answerPrompt(env, { accept: true });
   const accepted = await manager.installFile(crx, "example.crx");
-  await sleep(30);
-  assert.equal(await manager.handOffState(accepted.token), "waiting");
+  assert.equal(accepted.fromVersion, "0.9");
+  await sleep(2);
   answerPrompt(env, { accept: false });
   const dismissed = await manager.installFile(crx, "example.crx");
   await sleep(30);
-  assert.equal(await manager.handOffState(dismissed.token), "pending");
-  assert.equal(await manager.handOffState(accepted.token), "waiting", "the later dismissed one does not end it");
+  assert.deepEqual([await manager.handOffState(accepted.token), await manager.handOffState(dismissed.token)], ["pending", "pending"]);
   env.install(key.id, "1.0"); // applied at a browser start, no event
   const erase = chrome.downloads.erase;
-  chrome.downloads.erase = async () => { throw new Error("erase failed"); }; // keeps the confirmed entry listed
+  chrome.downloads.erase = async () => { throw new Error("erase failed"); }; // keeps the resolved entries listed
   await reconcileInstalls({ startedAt: Date.now() + 1 });
   chrome.downloads.erase = erase;
   assert.equal(await manager.handOffState(accepted.token), "confirmed");
@@ -391,29 +372,36 @@ test("handOffState tells a file install's waiting, pending and confirmed states 
   assert.equal(await manager.handOffState("no-such-token"), null);
 });
 
-// F13: model of the browser: Titanium's prompt is modal (a new prompt replaces an unanswered one),
-// an accepted update waits while the extension runs, Chromium applies only the last accepted one
-// (with an install event when the extension goes idle, without one at a restart), refuses a
-// downgrade (its copy is deleted all the same), and anyone may delete a copy.
-test("property: hand-offs, prompt answers, vanishing copies, install events, restarts and sweeps never claim current without the browser's version, never lose an update that may still apply, and keep the badge in step", async () => {
+// F13 + owner decision 7: model of the browser. Titanium's prompt is modal (a new prompt replaces an
+// unanswered one), an accepted update waits while the extension runs, Chromium applies only the
+// last accepted one (with an install event when the extension goes idle, without one at a
+// restart), refuses a downgrade (its copy is deleted all the same), anyone may delete a copy and
+// the browser's file checks may be stale.
+test("property: hand-offs, answers, deleted copies, stale file checks, install events, restarts and sweeps: current only on the browser's version, no guessed digest, no lost entry that may still apply, and the badge counts the updates offered", async () => {
   const key = await crxKey();
   const builds = { v1: await packCrx3(zip, key.pkcs8), v2: await packCrx3(rebuiltZip(), key.pkcs8), v3: await packCrx3(await versionZip("2.0"), key.pkcs8) };
   const versionOf = { v0: "0.9", v1: "1.0", v2: "1.0", v3: "2.0" };
+  // Weighted towards hand-offs of version 1.0, answers and install events, so several pending builds of one version meet often.
   const step = fc.oneof(
-    fc.record({ op: fc.constant("handOff"), tag: fc.constantFrom("v1", "v2", "v3") }),
-    fc.record({ op: fc.constantFrom("accept", "accept", "dismiss", "idle", "restart", "reconcile") }),
-    fc.record({ op: fc.constant("vanish"), i: fc.nat(7) }),
-    fc.record({ op: fc.constant("sweep"), late: fc.constantFrom(0, manager.PENDING_GRACE_MS + 1, manager.CONFIRM_WINDOW_MS + 1) }),
+    { arbitrary: fc.record({ op: fc.constant("handOff"), tag: fc.constantFrom("v1", "v2", "v1", "v2", "v3") }), weight: 5 },
+    { arbitrary: fc.record({ op: fc.constant("accept") }), weight: 4 },
+    { arbitrary: fc.record({ op: fc.constant("idle") }), weight: 3 },
+    { arbitrary: fc.record({ op: fc.constant("restart") }), weight: 1 },
+    { arbitrary: fc.record({ op: fc.constantFrom("dismiss", "reconcile", "stale") }), weight: 1 },
+    { arbitrary: fc.record({ op: fc.constant("vanish"), i: fc.nat(7) }), weight: 1 },
+    { arbitrary: fc.record({ op: fc.constant("sweep"), late: fc.constantFrom(0, manager.PENDING_GRACE_MS + 1, 3 * DAY) }), weight: 1 },
   );
   await fc.assert(
-    fc.asyncProperty(fc.boolean(), fc.boolean(), fc.array(step, { minLength: 1, maxLength: 12 }), async (rebuildIsLatest, runs1, steps) => {
+    fc.asyncProperty(fc.boolean(), fc.boolean(), fc.array(step, { minLength: 1, maxLength: 14 }), async (rebuildIsLatest, runs1, steps) => {
       const tags = rebuildIsLatest ? ["v1", "v2"] : ["v1", "v2", "v3"];
       const { env } = await updateSetup({ platform: "android", version: runs1 ? "1.0" : "0.9", key, builds: Object.fromEntries(tags.map((t) => [t, builds[t]])) });
       const latest = tags.at(-1);
+      const search = chrome.downloads.search;
+      let stale = false; // the browser's file check has not noticed deleted copies
+      chrome.downloads.search = async (q) => (await search(q)).map((i) => (stale ? { ...i, exists: true } : i));
       await manager.refreshBadge();
       let applied = runs1 ? "v1" : "v0"; // the build Chromium runs
       let waiting = null; // the accepted prompt Chromium applies later
-      let foreign = false; // a copy was deleted by someone else
       const prompts = []; // { token, tag, downloadId, answer }
       const open = () => (prompts.at(-1) && prompts.at(-1).answer === null ? prompts.at(-1) : null);
       const version = () => env.extensions.find((e) => e.id === key.id).version;
@@ -424,6 +412,7 @@ test("property: hand-offs, prompt answers, vanishing copies, install events, res
         waiting = null;
         return true;
       };
+      let committed = JSON.stringify(env.store["repo:o/r"].installed);
       for (const s of steps) {
         switch (s.op) {
           case "handOff": {
@@ -439,7 +428,8 @@ test("property: hand-offs, prompt answers, vanishing copies, install events, res
             const p = open();
             if (!p) break;
             p.answer = "accept";
-            env.files.get(p.downloadId).exists = false;
+            const f = env.files.get(p.downloadId); // gone when Extainium already deleted the copy
+            if (f) f.exists = false;
             // Chromium refuses a downgrade; its installer deletes the copy all the same.
             if (compareVersions(versionOf[p.tag], version()) >= 0) waiting = p;
             break;
@@ -450,11 +440,12 @@ test("property: hand-offs, prompt answers, vanishing copies, install events, res
           case "vanish": {
             const p = prompts.length ? prompts[s.i % prompts.length] : null;
             const f = p && env.files.get(p.downloadId);
-            if (!f || !f.exists) break;
-            f.exists = false;
-            foreign = true;
+            if (f) f.exists = false;
             break;
           }
+          case "stale":
+            stale = !stale;
+            break;
           case "idle":
             if (apply()) await manager.handleExtensionInstalled({ id: key.id, version: version() });
             break;
@@ -464,8 +455,7 @@ test("property: hand-offs, prompt answers, vanishing copies, install events, res
             const startedAt = Date.now() + 1;
             await sweepDownloads();
             await reconcileInstalls({ startedAt });
-            // Chromium applied what it would while starting: nothing prompted before waits any more.
-            assert.deepEqual(entries(env).filter((e) => e.vanishedAt && e.version && !e.confirmedAt), [], `waiting after a start: ${JSON.stringify(steps)}`);
+            assert.deepEqual(entries(env).filter((e) => e.version && !e.confirmedAt && e.downloadDone), [], "pending after a start: " + JSON.stringify(steps));
             break;
           }
           case "reconcile":
@@ -477,21 +467,25 @@ test("property: hand-offs, prompt answers, vanishing copies, install events, res
             break;
         }
         const [view] = await trackedView();
-        const at = JSON.stringify(steps);
-        if (view.state === "current") {
-          assert.equal(version(), versionOf[latest], `current only with the browser's version: ${at}`);
-          assert.equal(view.record.installed.digest, sha256(builds[latest]), `current only with the latest build committed: ${at}`);
-          if (!foreign) assert.equal(applied, latest, `current only when Chromium runs the latest build: ${at}`);
+        const at = JSON.stringify({ rebuildIsLatest, runs1, steps });
+        const installed = view.record.installed;
+        if (JSON.stringify(installed) !== committed) {
+          committed = JSON.stringify(installed);
+          assert.equal(installed.version, version(), "a commit names the browser's version: " + at);
+          if (installed.digest !== null) assert.equal(installed.digest, sha256(builds[applied]), "a committed digest is the build Chromium runs: " + at);
         }
+        if (view.state === "current") assert.equal(version(), versionOf[latest], "current only with the browser's version: " + at);
         if (waiting) {
           const e = env.store["install:" + waiting.token];
-          assert.ok(e && e.version && !e.confirmedAt, `the update Chromium may still apply keeps its entry: ${at}`);
+          assert.ok(e && e.version && !e.confirmedAt, "the update Chromium may still apply keeps its entry: " + at);
         }
-        const updates = view.state === "update" ? 1 : 0;
-        assert.equal(env.badge, updates ? String(updates) : "", `the badge counts the updates offered: ${at}`);
+        if (view.state === "not-applied") {
+          assert.ok(entries(env).some((e) => e.version && !e.confirmedAt && e.downloadDone && e.installed.tag === latest), "Not applied yet only with a pending prompt of the latest build: " + at);
+        }
+        assert.equal(env.badge, view.state === "update" ? "1" : "", "the badge counts the updates offered: " + at);
       }
     }),
-    { numRuns: 80 }
+    { numRuns: 300 }
   );
 });
 
@@ -551,4 +545,18 @@ test("a first self-tracking check that fails is tried again at the next start", 
   globalThis.fetch = real;
   assert.ok(servers);
   assert.equal(await manager.trackSelf(), `url:${key.id}`);
+});
+
+// F10 (closure repro "interruption while setting"): the opt-out is written before the record goes.
+test("an interrupted opt-out write keeps Extainium's record, so a later start does not recreate a removed card", async () => {
+  const { env, key } = await selfSetup();
+  assert.equal(await manager.trackSelf(), "url:" + key.id);
+  env.hooks.beforeSet = async (obj) => { if ("selfOptOut" in obj) throw new Error("interrupted opt-out write"); };
+  await assert.rejects(manager.removeRepo("url:" + key.id, false), /interrupted/);
+  env.hooks.beforeSet = null;
+  assert.ok(env.store["repo:url:" + key.id], "the removal failed as a whole");
+  assert.equal(await manager.trackSelf(), null, "still tracked, not recreated");
+  await manager.removeRepo("url:" + key.id, false);
+  assert.equal(await manager.trackSelf(), null);
+  assert.equal(env.store["repo:url:" + key.id], undefined);
 });

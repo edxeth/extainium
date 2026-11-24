@@ -9,7 +9,7 @@ import * as manager from "../src/lib/manager.js";
 import { newRecord, newSourceRecord } from "../src/lib/store.js";
 import { CWS_ORIGINS } from "../src/lib/sources.js";
 import { updatesXml } from "../scripts/release-files.js";
-import { addOrigins, askOrigins, cardId, checkLine, offersInstall, popupSummary } from "../src/ui-logic.js";
+import { addOrigins, askOrigins, cardId, checkLine, fileInstallStatus, offersInstall, popupSummary } from "../src/ui-logic.js";
 import { fakeChrome, fakeGithub } from "./helpers/fake-chrome.js";
 import { JUST_BLACK, REAL_APPS, fakeUpdateServers, fixtureText } from "./helpers/fake-update.js";
 
@@ -80,8 +80,8 @@ test("a self-hosted record whose server answers noupdate offers no Reinstall; on
   [view] = await trackedView();
   assert.deepEqual([view.state, offersInstall(view)], ["update", true]);
   assert.equal(offersInstall({ ...view, state: "identity-change" }), false, "an identity change is confirmed first");
-  // Owner decision: a vanished copy is only a hint, so a waiting card still offers the install.
-  assert.equal(offersInstall({ ...view, state: "waiting" }), true, "the prompt may have been cancelled");
+  // Owner decision: a Not applied yet card still offers the install (the prompt may have been cancelled).
+  assert.equal(offersInstall({ ...view, state: "not-applied" }), true, "the prompt may have been cancelled");
 });
 
 // ---- F5: the popup does not call a not-offered record up to date ----
@@ -96,14 +96,28 @@ test("the popup summary counts a store record the server offers no build of as n
   assert.equal(popupSummary([]).state, "empty");
 });
 
-// Requirement: an update waiting for Chromium is neither an update to install nor "all up to date".
-test("the popup summary lists updates waiting for Chromium apart from updates", () => {
+// Requirement: an update not applied yet is neither an update to install nor "all up to date".
+test("the popup summary lists updates not applied yet apart from updates", () => {
   const v = (key, state) => ({ key, state });
-  const only = popupSummary([v("a", "waiting"), v("b", "current")]);
-  assert.deepEqual([only.state, only.updates, only.waiting.map((x) => x.key)], ["waiting", [], ["a"]]);
+  const only = popupSummary([v("a", "not-applied"), v("b", "current")]);
+  assert.deepEqual([only.state, only.updates, only.notApplied.map((x) => x.key)], ["not-applied", [], ["a"]]);
   assert.notEqual(only.headline, popupSummary([v("b", "current")]).headline);
-  const mixed = popupSummary([v("a", "waiting"), v("c", "update")]);
-  assert.deepEqual([mixed.state, mixed.updates.map((x) => x.key), mixed.waiting.map((x) => x.key)], ["update", ["c"], ["a"]]);
+  const mixed = popupSummary([v("a", "not-applied"), v("c", "update")]);
+  assert.deepEqual([mixed.state, mixed.updates.map((x) => x.key), mixed.notApplied.map((x) => x.key)], ["update", ["c"], ["a"]]);
+});
+
+// F12 (closure repros file-ui.test.mjs): the install-from-file status follows the lib's
+// state (handOffState) and only browser evidence makes it "added".
+test("the file install status says added only on the browser's evidence and replaces its text when the hand-off ends", () => {
+  const watch = (fromVersion) => ({ id: ID, version: "1.0", name: "Example", fromVersion });
+  assert.equal(fileInstallStatus("confirmed", watch("0.9"), "1.0").kind, "added");
+  assert.equal(fileInstallStatus("pending", watch("0.9"), null).kind, "pending");
+  assert.equal(fileInstallStatus(null, watch("0.9"), "1.0").kind, "added", "ended, and the version changed since the hand-off");
+  assert.equal(fileInstallStatus(null, watch(null), "1.0").kind, "added", "ended, and the extension was installed since");
+  assert.equal(fileInstallStatus(null, watch("1.0"), "1.0").kind, "ended", "a same-version rebuild is added only on its install event");
+  assert.equal(fileInstallStatus(null, watch("0.9"), "0.9").kind, "ended", "not applied: the earlier text is replaced");
+  assert.equal(fileInstallStatus(null, watch("0.9"), null).kind, "ended", "uninstalled meanwhile");
+  for (const state of [null, "pending", "confirmed"]) assert.ok(fileInstallStatus(state, watch("1.0"), "1.0").text, String(state));
 });
 
 // ---- F14: the error count follows the records' current errors ----

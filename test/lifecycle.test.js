@@ -50,7 +50,7 @@ test("an install the browser has not confirmed leaves the update pending; onInst
   await installRelease(K);
   assert.equal(env.handedOff.length, 1);
   let [view] = await trackedView();
-  assert.equal(view.state, "update", "declined or not yet confirmed: still an update");
+  assert.equal(view.state, "not-applied", "declined or not yet confirmed: not applied yet, not current");
   assert.equal(view.record.installed.digest, "sha256:" + "0".repeat(64));
   await browserInstalls(env, key.id, "1.0");
   [view] = await trackedView();
@@ -100,6 +100,8 @@ test("two concurrent installs both get cleaned up", async () => {
   } } });
   await Promise.all([installFile(crx, "one.crx"), installFile(crx, "two.crx")]);
   await browserInstalls(env, key.id, "1.0");
+  assert.equal(env.removed.length, 1, "the event resolves the earlier prompt; the newest may still be unanswered");
+  await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS);
   assert.deepEqual(env.removed.sort(), [1, 2]);
 });
 
@@ -122,7 +124,7 @@ test("the sweep deletes the copy of a declined install after the grace period an
   await sweepDownloads(Date.now() + manager.PENDING_GRACE_MS);
   assert.deepEqual(env.removed, [1]);
   assert.deepEqual(env.erased, [1]);
-  assert.equal((await trackedView())[0].state, "update");
+  assert.equal((await trackedView())[0].state, "not-applied", "nothing committed; the browser has not applied it");
 });
 
 // F6: a removal failure other than "already gone" keeps the record so a later sweep retries.
@@ -193,30 +195,34 @@ async function twoBuildsSetup() {
   return { env, key, a, b };
 }
 
-// Item 2 (owner decision): Titanium's Add prompt is modal, so a new hand-off of
-// another build of the same ID and version supersedes the earlier one at once;
-// the install event confirms only the newest, and both copies are deleted.
-test("a second build of the same extension version supersedes the first; the event commits only the second", async () => {
-  const { env, key, b } = await twoBuildsSetup();
+// Owner decision (final round, F9/F7): a new hand-off of another build of the
+// same ID and version ends nothing; the install event names the version only,
+// so with both pending it records the version without a digest, resolves the
+// earlier one and keeps the newest (its prompt may still be unanswered).
+test("a second build of the same extension version ends nothing; their event records the version without a digest", async () => {
+  const { env, key } = await twoBuildsSetup();
   await installRelease(K, "v1");
   await installRelease(K, "v2");
   assert.equal(env.handedOff.length, 2);
   let [view] = await trackedView();
   assert.equal(view.pendingInstall.tag, "v2");
   const first = Object.values(env.store).find((v) => v && v.installed && v.installed.tag === "v1" && v.token);
-  assert.equal(first.version, null, "the first hand-off is no longer confirmable");
-  assert.ok(first.supersededBy, "the first hand-off is marked superseded");
+  assert.equal(first.version, "1.0", "the first hand-off is still pending");
   await browserInstalls(env, key.id, "1.0");
   [view] = await trackedView();
-  assert.deepEqual(view.record.installed, { tag: "v2", digest: sha256(b), version: "1.0" });
+  assert.deepEqual(view.record.installed, { tag: null, digest: null, version: "1.0" });
+  assert.equal(view.pendingInstall.tag, "v2");
+  assert.deepEqual(env.removed, [1], "the resolved copy is deleted");
+  await browserInstalls(env, key.id, "1.0"); // its own event
+  [view] = await trackedView();
+  assert.deepEqual(view.record.installed.tag, "v2");
   assert.equal(view.pendingInstall, null);
-  assert.deepEqual(env.removed.sort(), [1, 2], "the superseded copy is deleted too");
   assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("install:")), []);
 });
 
-// Item 2: pending entries of two builds of one ID and version (as an older
-// Extainium could leave them): one event confirms only the newest hand-off.
-test("an install event matching pending entries of two different builds commits only the newest", async () => {
+// Pending entries of two builds of one ID and version (as an older Extainium
+// could leave them): the event cannot say which, so only the version is recorded.
+test("an install event matching pending entries of two different builds records the version without a digest", async () => {
   const key = await crxKey();
   const env = fakeChrome({ extensions: [{ id: key.id, version: "1.0", name: "Example", enabled: true }] });
   fakeGithub([]);
@@ -232,8 +238,8 @@ test("an install event matching pending entries of two different builds commits 
   }
   await browserInstalls(env, key.id, "1.0");
   const [view] = await trackedView();
-  assert.equal(view.record.installed.tag, "v2");
-  assert.deepEqual(env.removed.sort(), [1, 2]);
+  assert.deepEqual(view.record.installed, { tag: null, digest: null, version: "1.0" });
+  assert.deepEqual(env.removed, [2], "the earlier one is resolved; the newest stays pending");
 });
 
 // F5: a local CRX never belongs to a tracked repo, even when one is selected;
@@ -286,7 +292,7 @@ test("the sweep leaves a download in progress alone and deletes it the grace per
   assert.deepEqual(env.cancelled, []);
   assert.deepEqual(env.erased, []);
   assert.ok(env.store["install:t"], "the entry is kept");
-  env.files.get(1).state = "complete";
+  Object.assign(env.files.get(1), { state: "complete", endTime: new Date(manager.PENDING_GRACE_MS + 2).toISOString() });
   await sweepDownloads(manager.PENDING_GRACE_MS + 2);
   assert.deepEqual(env.removed, [], "the prompt of the completed download may still show");
   await sweepDownloads(2 * manager.PENDING_GRACE_MS + 2);
@@ -461,7 +467,7 @@ test("a replacement started during the first download waits for it, and when it 
   chrome.downloads.download = download;
   assert.equal(calls, 1);
   const e = entryOf(env, "v1");
-  assert.deepEqual({ version: e.version, signedWith: e.signedWith, supersededBy: e.supersededBy }, { version: "1.0", signedWith: K, supersededBy: null });
+  assert.deepEqual({ version: e.version, signedWith: e.signedWith }, { version: "1.0", signedWith: K });
   const { extensionId } = await first.installing;
   await browserInstalls(env, extensionId, "1.0");
   assert.equal((await trackedView())[0].record.installed.tag, "v1");

@@ -40,8 +40,8 @@ export const cardId = (key) => `card-${key.replace(/[^a-z0-9]/gi, (c) => `_${c.c
 
 // True when the card of trackedView entry v offers Install / Update /
 // Reinstall / Install again: the lib says a downloadable build exists
-// (canInstall) and no identity change waits for confirmation. A "waiting"
-// card keeps it: a vanished copy does not prove the prompt was accepted.
+// (canInstall) and no identity change waits for confirmation. A "not-applied"
+// card keeps it: the prompt may have been cancelled.
 export const offersInstall = (v) => !!v.canInstall && v.state !== "identity-change";
 
 // Set by the storage migration when a 0.1 regex pattern had no template form:
@@ -64,23 +64,44 @@ export function checkLine(lastCheck, view, when) {
 }
 
 // The popup's headline for trackedView's view: { state: "empty" | "update" |
-// "attention" | "waiting" | "current", updates, attention (entries that need a
-// look in Extainium: an identity change, or a server that offers no build to
-// this browser), waiting (updates Chromium may apply when the extension
-// restarts, trackedView's "waiting"), headline }.
+// "attention" | "not-applied" | "current", updates, attention (entries that
+// need a look in Extainium: an identity change, or a server that offers no
+// build to this browser), notApplied (handed off, not applied by the browser
+// yet: trackedView's "not-applied"), headline }.
 export function popupSummary(view) {
   const updates = view.filter((v) => v.state === "update");
   const attention = view.filter((v) => v.state === "identity-change" || v.state === "not-offered");
-  const waiting = view.filter((v) => v.state === "waiting");
-  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : waiting.length ? "waiting" : "current";
+  const notApplied = view.filter((v) => v.state === "not-applied");
+  const state = !view.length ? "empty" : updates.length ? "update" : attention.length ? "attention" : notApplied.length ? "not-applied" : "current";
   const headline = state === "empty"
     ? "No tracked extensions"
     : state === "update"
       ? `${plural(updates.length, "update", "updates")} available`
       : state === "attention"
         ? `${plural(attention.length, "extension needs", "extensions need")} attention`
-        : state === "waiting"
-          ? `${plural(waiting.length, "update", "updates")} waiting for Chromium`
+        : state === "not-applied"
+          ? `${plural(notApplied.length, "update", "updates")} not applied yet`
           : "All up to date";
-  return { state, updates, attention, waiting, headline };
+  return { state, updates, attention, notApplied, headline };
+}
+
+// The status line of a hand-off the browser has not confirmed (cards and the
+// install from a file): whether the prompt was accepted is not known.
+export const notAppliedText = (name, version) =>
+  `Chromium has not applied ${version} yet. If you clicked Add, it applies when ${name} restarts, at the latest after a browser restart. If you cancelled, install again.`;
+
+// The install-from-file status after the lib's handOffState(token) state
+// ("confirmed" | "pending" | null) for watch { version, name, fromVersion: the
+// extension's version at the hand-off, or null }, extVersion: the version the
+// browser reports now, or null. Returns { kind, text }: "added" on the
+// browser's evidence (confirmed, or ended while the browser runs that version
+// and ran another at the hand-off; a same-version rebuild is added only by its
+// install event, which the page hears itself); "ended" when it ended without
+// that evidence; "pending" (notAppliedText) otherwise.
+export function fileInstallStatus(state, watch, extVersion) {
+  const what = `${watch.name} ${watch.version}`;
+  if (state === "confirmed") return { kind: "added", text: `${what} added.` };
+  if (state !== null) return { kind: "pending", text: notAppliedText(watch.name, watch.version) };
+  if (extVersion === watch.version && watch.fromVersion !== watch.version) return { kind: "added", text: `${what} added.` };
+  return { kind: "ended", text: `The browser has not reported ${what} as applied, and Extainium no longer follows it. If you still want it, install again.` };
 }

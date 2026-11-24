@@ -541,7 +541,7 @@ test("after the hand-off's page went away mid-download, a removal keeps the key 
   assert.equal(env.store["key:" + K], key, "held while the download is in progress");
   assert.equal(JSON.parse(await exportBackup()).keys[K], key, "exported while held");
   assert.deepEqual(env.cancelled, [], "the download is not cancelled");
-  env.files.get(1).state = "complete"; // no event: the page that listened is gone
+  Object.assign(env.files.get(1), { state: "complete", endTime: new Date(t0 + 1000).toISOString() }); // no event: the page that listened is gone
   await sweepDownloads(t0 + 1000);
   await sweepDownloads(t0 + 1000 + PENDING_GRACE_MS - 5000);
   assert.equal(env.store["key:" + K], key, "held within the grace period after the download completed");
@@ -574,8 +574,9 @@ test("after the hand-off's page went away before the download ID, a removal keep
 });
 
 // A hand-off whose page closed during the download never learns that it
-// completed; the sweep reads the download's end from the browser.
-test("a sweep finds the end of a download whose hand-off page went away and starts the prompt clock then", async () => {
+// completed; the sweep reads the download's end from the browser, and its
+// completion time starts the prompt clock (closure review F8: never the sweep's time).
+test("a sweep finds the end of a download whose hand-off page went away and starts the prompt clock at its completion time", async () => {
   const key = newPkcs8();
   const env = await trackedWithKey(key);
   Object.assign(env.store, { "install:t": {
@@ -587,7 +588,7 @@ test("a sweep finds the end of a download whose hand-off page went away and star
   const t0 = Date.now();
   await sweepDownloads(t0);
   assert.equal(env.store["key:" + K], key, "in progress: held");
-  env.files.get(7).state = "complete";
+  Object.assign(env.files.get(7), { state: "complete", endTime: new Date(t0 + 1000).toISOString() }); // the browser's completion time
   await sweepDownloads(t0 + 1000);
   assert.equal(env.store["key:" + K], key, "completed just now: held");
   assert.deepEqual(env.removed, [], "the copy is kept while the prompt may show");
