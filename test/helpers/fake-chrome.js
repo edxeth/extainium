@@ -21,6 +21,12 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
     removeFileError: null, // Error to throw from removeFile, or null
     onDownloadStarted: null, // async (id) => {} runs before download() resolves
     searchHook: null, // async (id) => {} runs inside downloads.search
+    newDownloadState: "complete", // state a new download starts in
+    changedListeners: new Set(),
+    erasedListeners: new Set(),
+    // Dispatches chrome.downloads.onChanged / onErased to the registered listeners.
+    emitChanged(delta) { for (const l of [...env.changedListeners]) l(delta); },
+    emitErased(id) { for (const l of [...env.erasedListeners]) l(id); },
     // Simulates the browser finishing an install of extension id at version.
     install(id, version, name = "Example") {
       env.extensions = env.extensions.filter((e) => e.id !== id);
@@ -68,7 +74,7 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       download: async ({ url, filename }) => {
         const bytes = new Uint8Array(await (await nativeFetch(url)).arrayBuffer());
         const id = env.nextDownloadId++;
-        env.files.set(id, { filename, bytes, state: "complete", exists: true });
+        env.files.set(id, { filename, bytes, state: env.newDownloadState, exists: true });
         env.handedOff.push(bytes);
         if (env.onDownloadStarted) await env.onDownloadStarted(id);
         return id;
@@ -78,7 +84,8 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
         const f = env.files.get(id);
         return f ? [{ id, filename: f.filename, state: f.state, danger: "safe", exists: f.exists }] : [];
       },
-      onChanged: { addListener() {}, removeListener() {} },
+      onChanged: { addListener: (l) => env.changedListeners.add(l), removeListener: (l) => env.changedListeners.delete(l) },
+      onErased: { addListener: (l) => env.erasedListeners.add(l), removeListener: (l) => env.erasedListeners.delete(l) },
       acceptDanger: async () => {},
       removeFile: async (id) => {
         if (env.removeFileError) throw env.removeFileError;
@@ -101,11 +108,32 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
   return env;
 }
 
-// releases: [{ tag, prerelease?, publishedAt?, assets: [{ name, bytes, digest? }] }]
-// Serves the releases API (pageSize releases per page, with Link rel="next")
-// and the asset downloads, including Range requests.
-export function fakeGithub(releases, { pageSize = 30, owner = "o", repo = "r" } = {}) {
-  const gh = { releases, requests: [], etags: new Map() };
+// A releases.atom feed in GitHub's format (as in fixtures/ublock-releases.atom)
+// for releases: [{ tag, publishedAt?, updatedAt? }], newest 10 first.
+export function atomFeed(releases, { owner = "o", repo = "r" } = {}) {
+  const entries = releases.slice(0, 10).map((r) => `  <entry>
+    <id>tag:github.com,2008:Repository/1/${r.tag}</id>
+    <updated>${r.updatedAt || r.publishedAt || "2026-01-01T00:00:00Z"}</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/${owner}/${repo}/releases/tag/${r.tag}"/>
+    <title>${r.tag}</title>
+    <content type="html">&lt;p&gt;notes&lt;/p&gt;</content>
+  </entry>`);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/${owner}/${repo}/releases</id>
+  <title>Release notes from ${repo}</title>
+  <updated>2026-01-01T00:00:00Z</updated>
+${entries.join("\n")}
+</feed>
+`;
+}
+
+// releases: [{ tag, prerelease?, publishedAt?, updatedAt?, assets: [{ name, bytes, digest? }] }]
+// Serves the releases API (pageSize releases per page, with Link rel="next"),
+// the asset downloads, including Range requests, and, when feed is set (gh.feed:
+// true for atomFeed(gh.releases), or the feed text), releases.atom; else the feed is 404.
+export function fakeGithub(releases, { pageSize = 30, owner = "o", repo = "r", feed = null } = {}) {
+  const gh = { releases, requests: [], etags: new Map(), feed };
   const assetUrl = (tag, name) => `https://github.com/${owner}/${repo}/releases/download/${tag}/${name}`;
   const api = (r) => ({
     draft: false,
@@ -121,6 +149,11 @@ export function fakeGithub(releases, { pageSize = 30, owner = "o", repo = "r" } 
     if (url.startsWith("blob:")) return nativeFetch(input, init);
     gh.requests.push({ url, headers: { ...(init.headers || {}) } });
     const u = new URL(url);
+    if (url === `https://github.com/${owner}/${repo}/releases.atom`) {
+      if (gh.feed === null) return new Response("not found", { status: 404 });
+      const text = gh.feed === true ? atomFeed(gh.releases, { owner, repo }) : gh.feed;
+      return new Response(text, { status: 200, headers: { "content-type": "application/atom+xml; charset=utf-8" } });
+    }
     if (u.hostname === "api.github.com") {
       const page = Number(u.searchParams.get("page") || 1);
       const all = gh.releases.map(api);

@@ -9,16 +9,13 @@ async function ensureAlarm() {
   }
 }
 
-function logCheck(result) {
-  if (result.errors.length) console.warn("[Extainium] check errors:", result.errors);
-}
-
 // The badge text does not survive a browser restart or an extension update.
 chrome.runtime.onInstalled.addListener(() => ensureAlarm().then(refreshBadge));
 chrome.runtime.onStartup.addListener(() => ensureAlarm().then(sweepDownloads).then(refreshBadge));
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM) sweepDownloads().then(checkAll).then(logCheck);
+  // Check errors are kept in lastCheck and on each repo record, where the UI shows them.
+  if (alarm.name === ALARM) sweepDownloads().then(checkAll);
   else if (alarm.name === SWEEP_ALARM) sweepDownloads();
 });
 

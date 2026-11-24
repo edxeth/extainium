@@ -8,6 +8,8 @@
 const MAGIC = [0x43, 0x72, 0x32, 0x34]; // "Cr24"
 const SIGNATURE_CONTEXT = new TextEncoder().encode("CRX3 SignedData\0");
 const RSA = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
+const ECDSA_KEY = { name: "ECDSA", namedCurve: "P-256" };
+const ECDSA_SIG = { name: "ECDSA", hash: "SHA-256" };
 
 export const CRX_MIME = "application/x-chrome-extension";
 
@@ -97,11 +99,13 @@ export function parseCrx(bytes) {
   if (zipOffset > bytes.length) {
     throw new Error(`parse CRX: header length ${headerLength} exceeds ${bytes.length} bytes`);
   }
-  const header = { rsa: [], ecdsa: [], crxId: null, zipOffset };
+  // signedHeaderData: the SignedData bytes as stored, which the signatures cover.
+  const header = { rsa: [], ecdsa: [], crxId: null, signedHeaderData: null, zipOffset };
   for (const f of parseFields(bytes.subarray(12, zipOffset))) {
     if (f.field === 2) header.rsa.push(parseProof(f.data));
     else if (f.field === 3) header.ecdsa.push(parseProof(f.data));
     else if (f.field === 10000) {
+      header.signedHeaderData = f.data;
       for (const s of parseFields(f.data)) if (s.field === 1) header.crxId = s.data;
     }
   }
@@ -155,6 +159,58 @@ export async function extensionIdFromCrx(bytes) {
     if (p.publicKey && (await extensionIdFromSpki(p.publicKey)) === id) return id;
   }
   throw new Error(`extension ID from CRX: no key in header hashes to crx_id ${id}`);
+}
+
+// DER ECDSA-Sig-Value (SEQUENCE { INTEGER r, INTEGER s }), the form CRX3
+// stores, to the fixed-size r || s that WebCrypto verifies. Null if malformed.
+function ecdsaDerToRaw(der, size = 32) {
+  if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2) return null;
+  const out = new Uint8Array(2 * size);
+  let pos = 2;
+  for (const at of [0, size]) {
+    if (der[pos] !== 0x02) return null;
+    const len = der[pos + 1];
+    let int = der.subarray(pos + 2, pos + 2 + len);
+    if (len === 0 || len > 0x7f || int.length !== len) return null;
+    while (int.length > 1 && int[0] === 0) int = int.subarray(1);
+    if (int.length > size) return null;
+    out.set(int, at + size - int.length);
+    pos += 2 + len;
+  }
+  return pos === der.length ? out : null;
+}
+
+// Verifies a CRX3 file as Chromium's crx_verifier.cc (VerifyCrx3) does: every
+// RSA (PKCS#1 v1.5 SHA-256) and ECDSA (P-256 SHA-256) proof must verify over
+// "CRX3 SignedData\0" | u32le size | signed header data | archive, and one
+// proof's key must derive the crx_id the signed header declares.
+// what: the file's name for errors. Returns the extension ID.
+export async function verifyCrx(bytes, what = "CRX") {
+  const fail = (msg) => new Error(`verify ${what}: ${msg}`);
+  const header = parseCrx(bytes);
+  if (!header.signedHeaderData || !header.crxId) throw fail("the header has no signed crx_id");
+  if (header.crxId.length !== 16) throw fail(`the signed crx_id has ${header.crxId.length} bytes, expected 16`);
+  const id = extensionIdFromCrxId(header.crxId);
+  const shd = header.signedHeaderData;
+  const payload = concatBytes(SIGNATURE_CONTEXT, u32le(shd.length), shd, bytes.subarray(header.zipOffset));
+  const proofs = [...header.rsa.map((p) => ["RSA", p]), ...header.ecdsa.map((p) => ["ECDSA", p])];
+  let idProof = false;
+  for (const [kind, { publicKey, signature }] of proofs) {
+    if (!publicKey || !signature) throw fail(`an ${kind} proof lacks its key or signature`);
+    const keyId = await extensionIdFromSpki(publicKey);
+    let key;
+    try {
+      key = await crypto.subtle.importKey("spki", publicKey, kind === "RSA" ? RSA : ECDSA_KEY, false, ["verify"]);
+    } catch (e) {
+      throw fail(`the key of ${kind} proof ${keyId} is not an ${kind === "RSA" ? "RSA" : "ECDSA P-256"} public key (${e.message})`);
+    }
+    const sig = kind === "RSA" ? signature : ecdsaDerToRaw(signature);
+    const ok = !!sig && (await crypto.subtle.verify(kind === "RSA" ? RSA : ECDSA_SIG, key, sig, payload));
+    if (!ok) throw fail(`the ${kind} signature of key ${keyId} does not verify; the file is damaged or was altered`);
+    if (keyId === id) idProof = true;
+  }
+  if (!idProof) throw fail(`no proof's key derives the declared extension ID ${id}`);
+  return id;
 }
 
 export function zipFromCrx(bytes) {

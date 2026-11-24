@@ -5,8 +5,8 @@ import nodeCrypto from "node:crypto";
 import fc from "fast-check";
 import { extensionIdFromCrx } from "../src/lib/crx.js";
 import {
-  addRepo, checkRepo, chooseAsset, exportBackup, handleExtensionInstalled, importBackup, installFile, installRelease,
-  removeRepo, setPrereleases, trackInstalledFile, trackedView,
+  PENDING_GRACE_MS, addRepo, checkRepo, chooseAsset, exportBackup, fileKeysView, handleExtensionInstalled, importBackup,
+  installFile, installRelease, removeRepo, setPrereleases, sweepDownloads, trackInstalledFile, trackedView,
 } from "../src/lib/manager.js";
 import { newRecord, parseBackup } from "../src/lib/store.js";
 import { exportedKey, fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
@@ -311,4 +311,189 @@ test("property: interleaved track/import/export/remove keep each linked ID with 
     }),
     { numRuns: 60 }
   );
+});
+
+
+// ---- Item 1: removing a repo with uninstall defers deleting its key ----
+// (owner decision) The key is deleted only once no pending or in-flight install
+// signed with it remains; until then it stays stored and exported.
+
+async function trackedWithKey(key) {
+  const env = fakeChrome();
+  fakeGithub([zipRelease("v1")]);
+  await importBackup(v1Backup([v1Record({ keyPkcs8: key })]));
+  return env;
+}
+const marks = (env) => Object.keys(env.store).filter((k) => k.startsWith("keydelete:"));
+
+test("a removal with uninstall while an install signed with the key is pending keeps and exports the key until the install expires", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  await installRelease(K);
+  await removeRepo(K, true);
+  assert.equal(env.store["key:" + K], key, "still stored while the install is pending");
+  assert.equal(JSON.parse(await exportBackup()).keys[K], key, "exported while it exists");
+  await sweepDownloads(Date.now());
+  assert.equal(env.store["key:" + K], key, "a sweep within the grace period keeps it");
+  await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+  assert.equal(env.store["key:" + K], undefined, "deleted once the pending install expired");
+  assert.equal(JSON.parse(await exportBackup()).keys[K], undefined);
+  assert.deepEqual(marks(env), []);
+});
+
+test("a removal with uninstall while an install signed with the key is pending deletes the key once that install is confirmed", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  await installRelease(K);
+  const id = await extensionIdFromCrx(env.handedOff[0]);
+  await removeRepo(K, true);
+  assert.equal(env.store["key:" + K], key);
+  env.install(id, "1.0");
+  await handleExtensionInstalled({ id, version: "1.0" });
+  assert.equal(env.store["key:" + K], undefined);
+  assert.deepEqual(marks(env), []);
+});
+
+test("a removal with uninstall during the hand-off's download keeps the key, and the failed download releases it", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  let keptDuring = null;
+  env.onDownloadStarted = async (downloadId) => {
+    env.onDownloadStarted = null;
+    await removeRepo(K, true);
+    keptDuring = env.store["key:" + K];
+    env.files.get(downloadId).state = "interrupted";
+  };
+  await assert.rejects(installRelease(K), /interrupted/);
+  assert.equal(keptDuring, key, "kept while the hand-off was in flight");
+  assert.equal(env.store["key:" + K], undefined, "deleted when the hand-off failed");
+  assert.deepEqual(marks(env), []);
+});
+
+// A removal with uninstall that completes while an install downloads its asset
+// leaves no key behind: the install must not create a new key for the removed repo.
+test("an install whose repo is removed with uninstall during the asset download stores no new key", async () => {
+  const key = newPkcs8();
+  const env = await trackedWithKey(key);
+  const { promise: entered, resolve: enter } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  const fetch0 = globalThis.fetch;
+  globalThis.fetch = async (...args) => {
+    if (String(args[0]).endsWith("/example.zip")) { enter(); await gate; }
+    return fetch0(...args);
+  };
+  const install = installRelease(K);
+  await entered;
+  await removeRepo(K, true);
+  release();
+  await assert.rejects(install, /no longer tracked/);
+  assert.equal(env.store["key:" + K], undefined);
+  assert.equal(env.handedOff.length, 0);
+});
+
+// Model: an install runs while a removal with uninstall and an export start at
+// generated points of its storage calls, and the scheduler orders the calls
+// of all three. A key that signed a handed-off CRX stays stored while that
+// install may be pending, every export of the repo holds the key, and a
+// removed repo's key is gone once the pending installs have expired.
+test("property: an install interleaved with a removal with uninstall keeps a handed-off CRX's key until it expires", async () => {
+  const key = newPkcs8();
+  const point = fc.integer({ min: 0, max: 40 });
+  await fc.assert(
+    fc.asyncProperty(fc.scheduler(), point, point, async (s, removeAt, exportAt) => {
+      const env = await trackedWithKey(key);
+      const local = chrome.storage.local;
+      let calls = 0;
+      let removed = false;
+      const exports = [];
+      const started = [];
+      const startAt = () => {
+        if (calls === removeAt) {
+          started.push(removeRepo(K, true).then(() => { removed = true; }, (e) => {
+            if (!/not tracked/.test(e.message)) throw e;
+          }));
+        }
+        if (calls === exportAt) started.push(exportBackup().then((t) => exports.push(JSON.parse(t))));
+        calls++;
+      };
+      const counted = (fn) => s.scheduleFunction(async (...args) => {
+        startAt();
+        return fn(...args);
+      });
+      chrome.storage.local = { get: counted(local.get), set: counted(local.set), remove: counted(local.remove) };
+      const install = installRelease(K).catch((e) => {
+        if (!/not tracked|no longer tracked/.test(e.message)) throw e;
+      });
+      await s.waitFor(install);
+      while (started.length) await s.waitFor(Promise.all(started.splice(0)));
+      chrome.storage.local = local;
+      const ids = new Set(await Promise.all(env.handedOff.map(extensionIdFromCrx)));
+      if (ids.size) {
+        assert.deepEqual([...ids], [idOfPkcs8(key)]);
+        assert.equal(env.store["key:" + K], key, "the key of a pending handed-off CRX is stored");
+      } else if (removed) {
+        assert.equal(env.store["key:" + K], undefined, "nothing pending: deleted at once");
+      }
+      for (const b of exports) if (b.repos.length) assert.equal(b.keys[K], key, "an export holds a tracked repo's key");
+      await sweepDownloads(Date.now() + PENDING_GRACE_MS);
+      if (removed) {
+        assert.equal(env.store["key:" + K], undefined, "deleted once the pending installs expired");
+        assert.deepEqual(marks(env), []);
+      }
+    }),
+    { numRuns: 100 }
+  );
+});
+
+// ---- Item 5: keys of zips installed from a file without a repo ----
+
+test("a zip installed from a file without a repo keeps its key: listed, exported, restored by an import, and usable again", async () => {
+  const env = fakeChrome();
+  fakeGithub([]);
+  const f = await installFile(zip, "local.zip", null);
+  assert.equal(idOfPkcs8(f.keyPkcs8), f.extensionId);
+  assert.deepEqual(await fileKeysView(), [{ value: "file:" + f.extensionId, extensionId: f.extensionId, name: null, version: null }]);
+  env.install(f.extensionId, "1.0");
+  assert.deepEqual((await fileKeysView())[0], { value: "file:" + f.extensionId, extensionId: f.extensionId, name: "Example", version: "1.0" });
+  const text = await exportBackup();
+  const backup = JSON.parse(text);
+  assert.equal(backup.version, 3);
+  assert.deepEqual(backup.fileKeys, { [f.extensionId]: f.keyPkcs8 });
+
+  const fresh = fakeChrome();
+  fakeGithub([]);
+  await importBackup(text);
+  assert.equal(fresh.store["filekey:" + f.extensionId], f.keyPkcs8);
+  const again = await installFile(zip, "local.zip", "file:" + f.extensionId);
+  assert.equal(again.extensionId, f.extensionId, "signed with the restored key: same extension ID");
+  assert.equal(await extensionIdFromCrx(fresh.handedOff[0]), f.extensionId);
+});
+
+test("tracking a file install attaches the stored file key to the repo and drops it from the file keys", async () => {
+  const env = fakeChrome();
+  fakeGithub([zipRelease("v1")]);
+  const f = await installedFromFile(env);
+  // The page's result may be gone (e.g. reloaded); the key comes from the store.
+  await trackInstalledFile(K, { ...f, keyPkcs8: null });
+  assert.equal(env.store["key:" + K], f.keyPkcs8);
+  assert.equal(env.store["filekey:" + f.extensionId], undefined);
+  assert.deepEqual(await fileKeysView(), []);
+  const backup = JSON.parse(await exportBackup());
+  assert.equal(backup.keys[K], f.keyPkcs8);
+  assert.deepEqual(backup.fileKeys, {});
+  assert.equal(backup.repos[0].extensionId, f.extensionId);
+});
+
+test("a file key that the backup also holds as a repo key is imported only as the repo key", async () => {
+  const key = newPkcs8();
+  const id = idOfPkcs8(key);
+  const env = fakeChrome();
+  fakeGithub([]);
+  await importBackup(JSON.stringify({
+    format: "extainium-backup", version: 3, exportedAt: "2026-11-24T00:00:00.000Z",
+    repos: [{ owner: "o", repo: "r", template: null, includePrereleases: false, extensionId: id, installed: null, addedAt: 1 }],
+    keys: { [K]: key }, fileKeys: { [id]: key },
+  }));
+  assert.equal(env.store["key:" + K], key);
+  assert.equal(env.store["filekey:" + id], undefined);
 });

@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import fc from "fast-check";
 import {
   encodeCrx, extensionIdFromCrx, extensionIdFromSpki, generateSigningKey,
-  importSigningKey, packCrx3, parseCrx, zipFromCrx,
+  importSigningKey, packCrx3, parseCrx, verifyCrx, zipFromCrx,
 } from "../src/lib/crx.js";
 
 // Independent reference: Chromium's ID is hex(sha256(spki)[0..16]) with 0-f -> a-p.
@@ -78,6 +78,50 @@ test("parseCrx rejects non-CRX bytes and a header longer than the file", () => {
   assert.throws(() => parseCrx(new TextEncoder().encode("PK\x03\x04....")), /missing Cr24 magic/);
   const crx = encodeCrx({ crxId: new Uint8Array(16) }, new Uint8Array());
   assert.throws(() => parseCrx(crx.subarray(0, crx.length - 1)), /exceeds/);
+});
+
+// ---- Item 4: CRX3 signature verification (Chromium crx_verifier.cc VerifyCrx3) ----
+// Fixtures built by test/fixtures/make-crx-fixtures.js with node:crypto; their
+// expected IDs (crx-fixtures.json) are derived there from the signing keys.
+const fixture = (name) => new Uint8Array(readFileSync(new URL("./fixtures/" + name, import.meta.url)));
+const fixtureIds = JSON.parse(readFileSync(new URL("./fixtures/crx-fixtures.json", import.meta.url), "utf8"));
+
+test("an independently built RSA-signed CRX3 verifies and yields the ID of its key", async () => {
+  assert.equal(await verifyCrx(fixture("signed-rsa.crx"), "signed-rsa.crx"), fixtureIds["signed-rsa.crx"]);
+});
+
+test("an independently built ECDSA P-256-signed CRX3 verifies and yields the ID of its key", async () => {
+  assert.equal(await verifyCrx(fixture("signed-ecdsa.crx"), "signed-ecdsa.crx"), fixtureIds["signed-ecdsa.crx"]);
+});
+
+test("one changed archive byte fails verification of an RSA and of an ECDSA CRX", async () => {
+  for (const [name, kind] of [["signed-rsa.crx", "RSA"], ["signed-ecdsa.crx", "ECDSA"]]) {
+    const bytes = fixture(name);
+    bytes[bytes.length - 30] ^= 1;
+    await assert.rejects(verifyCrx(bytes, name), new RegExp(`^Error: verify ${name}: the ${kind} signature of key ${fixtureIds[name]} does not verify`));
+  }
+});
+
+test("a proof whose signature was made with another key than its own fails verification", async () => {
+  await assert.rejects(verifyCrx(fixture("signed-wrong-key.crx"), "w.crx"), /verify w\.crx: the RSA signature of key [a-p]{32} does not verify/);
+});
+
+// crx_verifier.cc fails the file when any proof, not only the ID key's, does not verify.
+test("a valid ID proof next to a proof that does not verify fails verification", async () => {
+  await assert.rejects(verifyCrx(fixture("signed-extra-bad-proof.crx"), "x.crx"), /verify x\.crx: the RSA signature of key [a-p]{32} does not verify/);
+});
+
+test("a CRX whose valid proofs do not include the key of its declared ID fails verification", async () => {
+  await assert.rejects(verifyCrx(fixture("signed-no-id-proof.crx"), "n.crx"),
+    new RegExp(`verify n\\.crx: no proof's key derives the declared extension ID ${fixtureIds["signed-no-id-proof.crx"]}`));
+});
+
+// The real uBlock 1.77.0 header carries one RSA proof of fkgkib…; it covers the
+// archive, so the header alone (archive missing) does not verify.
+test("the real uBlock 1.77.0 CRX header without its archive fails verification of uBlock's RSA key", async () => {
+  const header = fixture("ublock-1.77.0-crx-header.bin");
+  await assert.rejects(verifyCrx(header, "uBlock0_1.77.0.chromium.crx"),
+    /verify uBlock0_1\.77\.0\.chromium\.crx: the RSA signature of key fkgkibajhfbepljeaefdnfnegdcjomkh does not verify/);
 });
 
 // Round-trip: parseCrx reads back every proof, the crx_id and the archive offset that encodeCrx wrote.

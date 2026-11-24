@@ -5,13 +5,21 @@
 import { CRX_MIME } from "./crx.js";
 
 // Unique per install so the browser never asks "Download file again?".
+// No "." at all, so the file has no extension: Chromium's file type policy
+// rates ".crx" ALLOW_ON_USER_GESTURE (download_file_types.asciipb), and a
+// chrome.downloads download has no gesture, so a ".crx" name made it
+// DANGEROUS_FILE and acceptDanger showed the "Confirm download"/Keep dialog.
+// An extension-less name keeps no extension (DownloadTargetDeterminer's
+// GenerateSafeFileName adds none) and gets the default, not-dangerous type;
+// the browser still installs it, as it recognises a CRX by the Blob's MIME type
+// (extensions::IsExtensionDownload). Chromium 158 sources; see README.
 function crxFilename(base) {
   const cleaned = String(base)
     .replace(/\.(crx|zip)$/i, "")
-    .replace(/[^a-zA-Z0-9._-]+/g, "_")
-    .replace(/^[._]+|[._]+$/g, "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
     .slice(0, 60);
-  return `${cleaned || "extension"}-${Date.now()}.crx`;
+  return `${cleaned || "extension"}-${Date.now()}`;
 }
 
 // Resolves with the download id once the CRX is downloaded; the browser then

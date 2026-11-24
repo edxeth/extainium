@@ -77,6 +77,29 @@ export async function fetchReleases(owner, repo, { token, cache = null, enough =
   return { pages, releases: pages.flatMap((p) => p.releases), rate };
 }
 
+// The entries of a GitHub releases.atom feed, newest first: [{ id, updated }].
+// GitHub lists the newest 10 releases and tags; an entry's <updated> is the
+// release's updated_at, which moves when an asset is uploaded or the release
+// edited. Service workers have no DOMParser; the feed's markup is regular
+// (entry content is HTML-escaped), so the two elements are read directly.
+export function parseReleaseFeed(text) {
+  if (!/<feed[\s>]/.test(text)) throw new Error(`parse releases feed: not an Atom feed: ${JSON.stringify(text.slice(0, 60))}`);
+  return [...text.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map(([, body], i) => {
+    const id = body.match(/<id>([^<]*)<\/id>/);
+    const updated = body.match(/<updated>([^<]*)<\/updated>/);
+    if (!id || !updated) throw new Error(`parse releases feed: entry #${i + 1} lacks <id> or <updated>`);
+    return { id: id[1], updated: updated[1] };
+  });
+}
+
+// Reads https://github.com/<owner>/<repo>/releases.atom (no API quota, no token).
+export async function fetchReleaseFeed(owner, repo) {
+  const url = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases.atom`;
+  const res = await fetch(url, { credentials: "omit", cache: "no-store" });
+  if (!res.ok) throw new Error(`fetch releases feed ${url}: HTTP ${res.status}`);
+  return parseReleaseFeed(await res.text());
+}
+
 async function getBytes(url, init, what) {
   const res = await fetch(url, { credentials: "omit", ...init });
   if (!res.ok) throw new Error(`download ${what}: HTTP ${res.status} from ${url}`);

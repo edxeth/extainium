@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/gorhill/uBlock/releases</id>
+  <link type="text/html" rel="alternate" href="https://github.com/gorhill/uBlock/releases"/>
+  <link type="application/atom+xml" rel="self" href="https://github.com/gorhill/uBlock/releases.atom"/>
+  <title>Release notes from uBlock</title>
+  <updated>2026-11-24T11:45:56Z</updated>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.1b4</id>
+    <updated>2026-11-24T12:02:36Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.1b4"/>
+    <title>1.77.1b4</title>
+    <content type="html">&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/75acc73223&quot;&gt;[regression] Restore behavior of injecting content scripts at launch&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/1d70d4a1c6&quot;&gt;[picker] Improve pairing logic and ensure dependencies are present&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/b51ee2a989&quot;&gt;[regression] Use JSON.stringify() to eliminate undefined values&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/080ecbd3d6&quot;&gt;Remove per-tab network request journaling&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/0b5d131ea7&quot;&gt;Refactor contexts (tabs/frames) management&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/73b2bb6e29&quot;&gt;[picker] Improve reliability of element picker launch&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.77.1b4...master&quot;&gt;Commits to Master Since This Release&lt;/a&gt;&lt;/p&gt;
+&lt;h4&gt;How to Install the Developer Build:&lt;/h4&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Firefox&lt;/strong&gt;: Download the build from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b4/uBlock0_1.77.1b4.firefox.signed.xpi&quot;&gt;uBlock0_1.77.1b4.firefox.signed.xpi&lt;/a&gt;&lt;br&gt;
+uBO works best on Gecko-based browsers, check out &lt;a href=&quot;https://github.com/gorhill/uBlock/wiki/uBlock-Origin-works-best-on-Firefox&quot;&gt;why&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Chromium&lt;/strong&gt;: Install directly from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b4/uBlock0_1.77.1b4.chromium.crx&quot;&gt;signed CRX package&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.1b3</id>
+    <updated>2026-11-23T17:36:58Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.1b3"/>
+    <title>1.77.1b3</title>
+    <content type="html">&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/75acc73223&quot;&gt;[regression] Restore behavior of injecting content scripts at launch&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/1d70d4a1c6&quot;&gt;[picker] Improve pairing logic and ensure dependencies are present&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/b51ee2a989&quot;&gt;[regression] Use JSON.stringify() to eliminate undefined values&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/080ecbd3d6&quot;&gt;Remove per-tab network request journaling&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/0b5d131ea7&quot;&gt;Refactor contexts (tabs/frames) management&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/73b2bb6e29&quot;&gt;[picker] Improve reliability of element picker launch&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.77.1b3...master&quot;&gt;Commits to Master Since This Release&lt;/a&gt;&lt;/p&gt;
+&lt;h4&gt;How to Install the Developer Build:&lt;/h4&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Firefox&lt;/strong&gt;: Download the build from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b3/uBlock0_1.77.1b3.firefox.signed.xpi&quot;&gt;uBlock0_1.77.1b3.firefox.signed.xpi&lt;/a&gt;&lt;br&gt;
+uBO works best on Gecko-based browsers, check out &lt;a href=&quot;https://github.com/gorhill/uBlock/wiki/uBlock-Origin-works-best-on-Firefox&quot;&gt;why&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Chromium&lt;/strong&gt;: Install directly from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b3/uBlock0_1.77.1b3.chromium.crx&quot;&gt;signed CRX package&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.1b2</id>
+    <updated>2026-11-23T14:33:26Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.1b2"/>
+    <title>1.77.1b2</title>
+    <content type="html">&lt;p&gt;New revision for dev build&lt;/p&gt;</content>
+    <author>
+      <name>gorhill</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/585534?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.1b1</id>
+    <updated>2026-11-22T20:42:05Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.1b1"/>
+    <title>1.77.1b1</title>
+    <content type="html">&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/b51ee2a989&quot;&gt;[regression] Use JSON.stringify() to eliminate undefined values [in troubleshooting info]&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/080ecbd3d6&quot;&gt;Remove per-tab network request journaling&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/0b5d131ea7&quot;&gt;Refactor contexts (tabs/frames) management&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/73b2bb6e29&quot;&gt;[picker] Improve reliability of element picker launch&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.77.1b1...master&quot;&gt;Commits to Master Since This Release&lt;/a&gt;&lt;/p&gt;
+&lt;h4&gt;How to Install the Developer Build:&lt;/h4&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Firefox&lt;/strong&gt;: Download the build from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b1/uBlock0_1.77.1b1.firefox.signed.xpi&quot;&gt;uBlock0_1.77.1b1.firefox.signed.xpi&lt;/a&gt;&lt;br&gt;
+uBO works best on Gecko-based browsers, check out &lt;a href=&quot;https://github.com/gorhill/uBlock/wiki/uBlock-Origin-works-best-on-Firefox&quot;&gt;why&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Chromium&lt;/strong&gt;: Install directly from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.1b1/uBlock0_1.77.1b1.chromium.crx&quot;&gt;signed CRX package&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.1b0</id>
+    <updated>2026-11-22T18:49:51Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.1b0"/>
+    <title>1.77.1b0</title>
+    <content type="html">&lt;p&gt;New revision for dev build&lt;/p&gt;</content>
+    <author>
+      <name>gorhill</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/585534?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.77.0</id>
+    <updated>2026-11-22T18:05:49Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.77.0"/>
+    <title>1.77.0</title>
+    <content type="html">&lt;p&gt;This new major version, 1.77.0, only two weeks after 1.76.0 was published is to make it easy to understand that security issues reported in both 1.75.0 and 1.76.0 have been adressed.&lt;/p&gt;
+&lt;p&gt;Thanks to &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/syvb/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/syvb&quot;&gt;@syvb&lt;/a&gt; and &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/mawalu/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/mawalu&quot;&gt;@mawalu&lt;/a&gt; for having spent their time on identifying, investigating, and reporting these issues with working proof-of-concepts, this helps improve uBO for the benefit of all users.&lt;/p&gt;
+&lt;p&gt;Details of the two reported security issues in recent weeks:&lt;/p&gt;
+&lt;h3&gt;A. &lt;a href=&quot;https://github.com/gorhill/uBlock/security/advisories/GHSA-cmqw-9r2w-6wv2&quot;&gt;&quot;Universal XSS from website-driven element picker&quot;&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;Reported by &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/syvb/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/syvb&quot;&gt;@syvb&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The vulnerability itself was adressed in 1.75.4. More related commits have been about further hardening uBO.&lt;/p&gt;
+&lt;p&gt;The issue has been also detailed by the reporter itself: &lt;a href=&quot;https://iter.ca/post/ubo-uxss/&quot; rel=&quot;nofollow&quot;&gt;https://iter.ca/post/ubo-uxss/&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;B. &lt;a href=&quot;https://github.com/gorhill/uBlock/security/advisories/GHSA-fmr5-x4fm-vhgp&quot;&gt;&quot;2-click clickjacking to trusted-list compromise / universal XSS&quot;&lt;/a&gt;&lt;/h3&gt;
+&lt;p&gt;Reported by &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/mawalu/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/mawalu&quot;&gt;@mawalu&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The vulnerability itself was adressed in 1.76.2. More related commits have been about improving the fix, and for adressing other issues such as leaked UUID, and further hardening uBO.&lt;/p&gt;
+&lt;p&gt;The issue was originally reported at &lt;a href=&quot;https://bugzilla.mozilla.org/show_bug.cgi?id=2091796&quot; rel=&quot;nofollow&quot;&gt;https://bugzilla.mozilla.org/show_bug.cgi?id=2091796&lt;/a&gt;.&lt;/p&gt;
+&lt;h3&gt;Further hardening uBO&lt;/h3&gt;
+&lt;p&gt;Beside fixing the XSS issues themselves, the following changes have been made:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Use closed shadow DOM to hide content of scriptlets when programmatically injected (in Firefox, scriptlets are injected declaratively except for the first time a website loads).&lt;br&gt;
+This would have prevented first segment in chain leading to B.&lt;/li&gt;
+&lt;li&gt;Prevent click2load iframe from embedding non-HTTP URLs&lt;br&gt;
+This would have prevented second segment in chain leading to B.&lt;/li&gt;
+&lt;li&gt;Prevent subscription capability when asset viewer is embedded.&lt;br&gt;
+This would have prevented third segment in chain leading to B.&lt;/li&gt;
+&lt;li&gt;Use closed shadow DOM to embed the element picker in website when in use. This hides the element picker from view when embedded in a webpage.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;None of the reported security issues affect uBO Lite, though some of the improvements have been applied to uBO Lite, such as using closed shadow DOM to embed uBO Lite&#39;s own element picker and other overlay-based tools in web pages.&lt;/p&gt;
+&lt;h3&gt;Action to take&lt;/h3&gt;
+&lt;p&gt;In both cases, the requirement was to visit a web page controlled by an attacker.&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Verify that you are not subscribed to one or more filter lists you didn&#39;t import yourself&lt;/li&gt;
+&lt;li&gt;Verify that you do not have custom filters that you did not create yourself, especially filters requiring trust if you enabled &lt;em&gt;&quot;Allow custom filters requiring trust&quot;&lt;/em&gt;. Filters requiring trust are normally reported as error when the setting &lt;em&gt;&quot;Allow custom filters requiring trust&quot;&lt;/em&gt; is not checked.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;p&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.77.0...master&quot;&gt;Commits to master since this release&lt;/a&gt;&lt;br&gt;
+&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.76.6...1.77.0&quot;&gt;Commits since last release&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;To install the stable build:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Firefox&lt;/strong&gt;: Install from AMO: &lt;a href=&quot;https://addons.mozilla.org/en-US/firefox/addon/ublock-origin/&quot; rel=&quot;nofollow&quot;&gt;https://addons.mozilla.org/en-US/firefox/addon/ublock-origin/&lt;/a&gt;&lt;br&gt;
+&lt;a href=&quot;https://github.com/gorhill/uBlock/wiki/uBlock-Origin-works-best-on-Firefox&quot;&gt;uBO works best on Firefox&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Chromium&lt;/strong&gt;: Install directly from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.77.0/uBlock0_1.77.0.chromium.crx&quot;&gt;signed CRX package&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Edge&lt;/strong&gt;: Install from Microsoft Store: &lt;a href=&quot;https://microsoftedge.microsoft.com/addons/detail/odfafepnkmbhccpbejgmiehpchacaeak&quot; rel=&quot;nofollow&quot;&gt;https://microsoftedge.microsoft.com/addons/detail/odfafepnkmbhccpbejgmiehpchacaeak&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Opera&lt;/strong&gt;: Install from Opera addons: &lt;a href=&quot;https://addons.opera.com/en/extensions/details/ublock/&quot; rel=&quot;nofollow&quot;&gt;https://addons.opera.com/en/extensions/details/ublock/&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/5934db2a04&quot;&gt;[security] Disallow non-HTTP URLs in click2load resource&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/e1aa62030d&quot;&gt;Fix text color of code in &lt;code&gt;prevent-clipboard-write&lt;/code&gt; scriptlet&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/3028a92bdb&quot;&gt;[regression] Fix broken DOM inspector&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/2e7c2d4e52&quot;&gt;Use &lt;code&gt;structuredClone(...)&lt;/code&gt; instead of &lt;code&gt;JSON.parse(JSON.stringify(...))&lt;/code&gt;&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/e68e05cde0&quot;&gt;[shim] Add optimizely.js redirect resource&lt;/a&gt; by &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/ryanbr/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/ryanbr&quot;&gt;@ryanbr&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.76.7b0</id>
+    <updated>2026-11-20T16:13:44Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.76.7b0"/>
+    <title>1.76.7b0</title>
+    <content type="html">&lt;p&gt;New revision for dev build&lt;/p&gt;</content>
+    <author>
+      <name>gorhill</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/585534?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.76.6</id>
+    <updated>2026-11-20T16:15:52Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.76.6"/>
+    <title>1.76.6</title>
+    <content type="html">&lt;p&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.76.6...master&quot;&gt;Commits to master since this release&lt;/a&gt;&lt;br&gt;
+&lt;a href=&quot;https://github.com/gorhill/uBlock/compare/1.76.4...1.76.6&quot;&gt;Commits since last release&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;To install the stable build:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Firefox&lt;/strong&gt;: Install from AMO: &lt;a href=&quot;https://addons.mozilla.org/en-US/firefox/addon/ublock-origin/&quot; rel=&quot;nofollow&quot;&gt;https://addons.mozilla.org/en-US/firefox/addon/ublock-origin/&lt;/a&gt;&lt;br&gt;
+&lt;a href=&quot;https://github.com/gorhill/uBlock/wiki/uBlock-Origin-works-best-on-Firefox&quot;&gt;uBO works best on Firefox&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Chromium&lt;/strong&gt;: Install directly from &lt;a href=&quot;https://github.com/gorhill/uBlock/releases/download/1.76.6/uBlock0_1.76.6.chromium.crx&quot;&gt;signed CRX package&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Edge&lt;/strong&gt;: Install from Microsoft Store: &lt;a href=&quot;https://microsoftedge.microsoft.com/addons/detail/odfafepnkmbhccpbejgmiehpchacaeak&quot; rel=&quot;nofollow&quot;&gt;https://microsoftedge.microsoft.com/addons/detail/odfafepnkmbhccpbejgmiehpchacaeak&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Opera&lt;/strong&gt;: Install from Opera addons: &lt;a href=&quot;https://addons.opera.com/en/extensions/details/ublock/&quot; rel=&quot;nofollow&quot;&gt;https://addons.opera.com/en/extensions/details/ublock/&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;hr&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/765c51daa1&quot;&gt;[picker] Fix unpleasant flickering of mouse cursor in picking mode&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/a23b117141&quot;&gt;[scriptlets] Add (back) support for path-based targets&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/e743ee760f&quot;&gt;[security] Use shadow DOM when programmatically injecting scriptlets&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href=&quot;https://github.com/gorhill/uBlock/commit/1765528bec&quot;&gt;[security] Conceal DOM of overlay-based tools inside a shadow DOM&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.76.5b6</id>
+    <updated>2026-11-19T18:20:01Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.76.5b6"/>
+    <title>1.76.5b6</title>
+    <content type="html">&lt;p&gt;New revision for dev build&lt;/p&gt;</content>
+    <author>
+      <name>gorhill</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/585534?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/33263118/1.76.5b5</id>
+    <updated>2026-11-19T15:53:02Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/gorhill/uBlock/releases/tag/1.76.5b5"/>
+    <title>1.76.5b5</title>
+    <content type="html">&lt;p&gt;New revision for dev build&lt;/p&gt;</content>
+    <author>
+      <name>gorhill</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/585534?s=60&amp;v=4"/>
+  </entry>
+</feed>

@@ -138,6 +138,8 @@ test("an imported key that derives another ID than the installed linked extensio
 // ---- F15: generated backups ----
 // A small pool of real keys (RSA generation is slow); records refer to them.
 const KEY_POOL = [pkcs8(), pkcs8(), pkcs8()];
+// File keys are filed under the ID of their key (reference derivation idOfPkcs8).
+const fileKeysOf = (picks) => Object.fromEntries([...new Set(picks.map((i) => i % KEY_POOL.length))].map((i) => [idOfPkcs8(KEY_POOL[i]), KEY_POOL[i]]));
 const name = fc.stringMatching(/^[A-Za-z0-9_.-]{1,12}$/);
 const id = fc.stringMatching(/^[a-p]{32}$/);
 const hex64 = fc.stringMatching(/^[0-9a-f]{64}$/);
@@ -160,24 +162,41 @@ const record = fc.record({
 const lowerKey = (r) => `${r.owner}/${r.repo}`.toLowerCase();
 const records = fc.uniqueArray(record, { maxLength: 5, selector: lowerKey });
 // Keys for some tracked repos and for some repos that are no longer tracked (retained).
-const backupInput = fc.tuple(records, fc.array(fc.tuple(name, name), { maxLength: 2 }), fc.array(fc.nat(), { maxLength: 10 }))
-  .map(([recs, retained, picks]) => {
+const backupInput = fc.tuple(records, fc.array(fc.tuple(name, name), { maxLength: 2 }), fc.array(fc.nat(), { maxLength: 10 }), fc.array(fc.nat(), { maxLength: 3 }))
+  .map(([recs, retained, picks, filePicks]) => {
     const keys = {};
     [...recs.map(lowerKey), ...retained.map(([o, r]) => `${o}/${r}`.toLowerCase())]
       .forEach((k, i) => { if (picks[i] !== undefined && picks[i] % 3) keys[k] = KEY_POOL[picks[i] % KEY_POOL.length]; });
-    return { recs, keys };
+    return { recs, keys, fileKeys: fileKeysOf(filePicks) };
   });
 
+// Item 5: version 3 adds the file keys.
 test("property: a generated valid backup round-trips through export and parse", async () => {
   await fc.assert(
-    fc.asyncProperty(backupInput, async ({ recs, keys }) => {
-      const exported = makeBackup(recs, keys, new Date(0));
+    fc.asyncProperty(backupInput, async ({ recs, keys, fileKeys }) => {
+      const exported = makeBackup(recs, keys, new Date(0), fileKeys);
+      assert.equal(exported.version, 3);
       const parsed = await parseBackup(JSON.stringify(exported));
       assert.deepEqual(parsed.keys, keys);
+      assert.deepEqual(parsed.fileKeys, fileKeys);
       assert.deepEqual(parsed.warnings, []);
-      assert.deepEqual(makeBackup(parsed.repos, parsed.keys, new Date(0)), exported);
+      assert.deepEqual(makeBackup(parsed.repos, parsed.keys, new Date(0), parsed.fileKeys), exported);
     }),
     { numRuns: 150 }
+  );
+});
+
+// Item 5: a version 2 backup (no fileKeys) still imports with its records and keys.
+test("property: a generated valid version 2 backup parses to its records and keys, without file keys", async () => {
+  await fc.assert(
+    fc.asyncProperty(backupInput, async ({ recs, keys }) => {
+      const { fileKeys, ...v2 } = { ...makeBackup(recs, keys, new Date(0)), version: 2 };
+      const parsed = await parseBackup(JSON.stringify(v2));
+      assert.deepEqual(parsed.keys, keys);
+      assert.deepEqual(parsed.fileKeys, {});
+      assert.deepEqual({ ...makeBackup(parsed.repos, parsed.keys, new Date(0)), version: 2, fileKeys: undefined }, { ...v2, fileKeys: undefined });
+    }),
+    { numRuns: 100 }
   );
 });
 
@@ -214,6 +233,8 @@ const BAD = {
 };
 const BAD_V1 = { pattern: [5, {}, true], keyPkcs8: [false, 5, "bm90IGEga2V5", "not base64!"] };
 const BAD_KEYS = [["Bad Name", null], ["o/r/x", null], [null, "bm90IGEga2V5"], [null, "%%%"], [null, 5]];
+// [extension ID or null (the key's own ID), key or null (KEY_POOL[0])]
+const BAD_FILE_KEYS = [["abc", null], ["A".repeat(32), null], ["a".repeat(32), null], [null, "bm90IGEga2V5"], [null, 5], [null, "%%%"]];
 
 test("property: a generated backup with one invalid field is rejected with an error naming that field", async () => {
   const v2Case = fc.tuple(backupInput, fc.constantFrom(...Object.keys(BAD)), fc.nat(), fc.nat()).map(([{ recs, keys }, field, i, j]) => {
@@ -233,8 +254,14 @@ test("property: a generated backup with one invalid field is rejected with an er
     exported.keys[badName ?? "o/r"] = badValue ?? KEY_POOL[0];
     return { text: JSON.stringify(exported), field: "keys" };
   });
+  const fileKeyCase = fc.tuple(backupInput, fc.constantFrom(...BAD_FILE_KEYS, "missing")).map(([{ recs, keys, fileKeys }, bad]) => {
+    const exported = makeBackup(recs, keys, new Date(0), fileKeys);
+    if (bad === "missing") delete exported.fileKeys;
+    else exported.fileKeys[bad[0] ?? idOfPkcs8(KEY_POOL[0])] = bad[1] ?? KEY_POOL[0];
+    return { text: JSON.stringify(exported), field: "fileKeys" };
+  });
   await fc.assert(
-    fc.asyncProperty(fc.oneof(v2Case, v1Case, keyCase), async ({ text, field }) => {
+    fc.asyncProperty(fc.oneof(v2Case, v1Case, keyCase, fileKeyCase), async ({ text, field }) => {
       await assert.rejects(parseBackup(text), (e) => {
         assert.match(e.message, /^import backup: /);
         assert.ok(e.message.includes(field), `${e.message} names ${field}`);

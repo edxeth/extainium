@@ -191,54 +191,47 @@ async function twoBuildsSetup() {
   return { env, key, a, b };
 }
 
-// F4: the install event names only ID and version, so a second build of the
-// same ID and version is not handed off while the first may be at its prompt;
-// the event then commits the one build that is pending.
-test("a second build of the same extension version is refused while the first waits for confirmation", async () => {
-  const { env, key, a } = await twoBuildsSetup();
-  await installRelease(K, "v1");
-  await assert.rejects(installRelease(K, "v2"), /another build of extension [a-p]{32} 1\.0 .*not confirmed/);
-  assert.equal(env.handedOff.length, 1);
-  await browserInstalls(env, key.id, "1.0");
-  const [view] = await trackedView();
-  assert.deepEqual(view.record.installed, { tag: "v1", digest: sha256(a), version: "1.0" });
-  assert.deepEqual(env.removed, [1]);
-});
-
-// F4: after the grace period a new build replaces the unconfirmed one; the event commits only the new build.
-test("after the grace period a new build replaces the unconfirmed one, and the event commits only the new build", async (t) => {
+// Item 2 (owner decision): Titanium's Add prompt is modal, so a new hand-off of
+// another build of the same ID and version supersedes the earlier one at once;
+// the install event confirms only the newest, and both copies are deleted.
+test("a second build of the same extension version supersedes the first; the event commits only the second", async () => {
   const { env, key, b } = await twoBuildsSetup();
   await installRelease(K, "v1");
-  const realNow = Date.now;
-  t.after(() => { Date.now = realNow; });
-  Date.now = () => realNow() + manager.PENDING_GRACE_MS;
   await installRelease(K, "v2");
+  assert.equal(env.handedOff.length, 2);
+  let [view] = await trackedView();
+  assert.equal(view.pendingInstall.tag, "v2");
+  const first = Object.values(env.store).find((v) => v && v.installed && v.installed.tag === "v1" && v.token);
+  assert.equal(first.version, null, "the first hand-off is no longer confirmable");
+  assert.ok(first.supersededBy, "the first hand-off is marked superseded");
   await browserInstalls(env, key.id, "1.0");
-  const [view] = await trackedView();
+  [view] = await trackedView();
   assert.deepEqual(view.record.installed, { tag: "v2", digest: sha256(b), version: "1.0" });
   assert.equal(view.pendingInstall, null);
+  assert.deepEqual(env.removed.sort(), [1, 2], "the superseded copy is deleted too");
+  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("install:")), []);
 });
 
-// F4: one event commits at most one build. Two pending entries of different
-// builds (e.g. left by an older version) cannot be told apart: none is committed.
-test("an install event matching pending entries of two different builds commits neither", async () => {
+// Item 2: pending entries of two builds of one ID and version (as an older
+// Extainium could leave them): one event confirms only the newest hand-off.
+test("an install event matching pending entries of two different builds commits only the newest", async () => {
   const key = await crxKey();
   const env = fakeChrome({ extensions: [{ id: key.id, version: "1.0", name: "Example", enabled: true }] });
   fakeGithub([]);
   await importBackup(v1Backup([v1Record({ extensionId: key.id, installed: { tag: "old", digest: null, version: "1.0" } })]));
-  const entry = (token, tag, crxHash, downloadId) => ({
+  const entry = (token, tag, crxHash, downloadId, at) => ({
     token, repoKey: K, extensionId: key.id, version: "1.0", installed: { tag, digest: null, version: "1.0" }, crxHash,
-    downloadId, downloadDone: true, at: Date.now(), confirmedAt: null, fileGone: false, removeError: null,
+    downloadId, downloadDone: true, at, confirmedAt: null, fileGone: false, removeError: null,
   });
-  for (const [id, e] of [[1, entry("a", "v1", "aa", 1)], [2, entry("b", "v2", "bb", 2)]]) {
+  const now = Date.now();
+  for (const [id, e] of [[1, entry("b", "v2", "bb", 1, now - 1000)], [2, entry("a", "v1", "aa", 2, now - 2000)]]) {
     env.store["install:" + e.token] = e;
     env.files.set(id, { filename: e.token + ".crx", bytes: new Uint8Array(1), state: "complete", exists: true });
   }
   await browserInstalls(env, key.id, "1.0");
   const [view] = await trackedView();
-  assert.equal(view.record.installed.tag, "old");
-  assert.deepEqual(env.removed, []);
-  assert.ok(!env.store["install:a"].confirmedAt && !env.store["install:b"].confirmedAt, "both stay pending");
+  assert.equal(view.record.installed.tag, "v2");
+  assert.deepEqual(env.removed.sort(), [1, 2]);
 });
 
 // F5: a local CRX never belongs to a tracked repo, even when one is selected;
@@ -378,4 +371,34 @@ test("a copy the browser still holds right after the install is deleted by a qui
   assert.deepEqual(env.erased, [1]);
   assert.deepEqual(errors, []);
   assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("install:")), []);
+});
+
+
+// Item 4: a CRX is verified before the hand-off; a damaged one never reaches the browser.
+test("a CRX release asset with a changed archive byte is refused before the hand-off", async () => {
+  const key = await crxKey();
+  const crx = await packCrx3(zip, key.pkcs8);
+  crx[crx.length - 30] ^= 1;
+  const env = fakeChrome();
+  fakeGithub([{ tag: "v1", assets: [{ name: "example.crx", bytes: crx }] }]);
+  await importBackup(v1Backup([v1Record()]));
+  await assert.rejects(installRelease(K), new RegExp(`verify example\\.crx: the RSA signature of key ${key.id} does not verify`));
+  assert.equal(env.handedOff.length, 0);
+  await assert.rejects(installFile(crx, "local.crx", null), /verify local\.crx: the RSA signature/);
+  assert.equal(env.handedOff.length, 0);
+});
+
+// Item 6: Chromium (158) classes a ".crx" download started without a user
+// gesture as dangerous, and chrome.downloads.acceptDanger then shows the
+// "Confirm download"/Keep dialog. A name without any "." keeps no extension
+// (download_target_determiner.cc GenerateSafeFileName passes no MIME type for
+// an extension-less name) and gets the default, not-dangerous file type, while
+// the install path keys on the MIME type alone.
+test("the CRX is handed to the browser under a file name without any dot", async () => {
+  const key = await crxKey();
+  const env = fakeChrome();
+  await installFile(await packCrx3(zip, key.pkcs8), "uBlock0_1.77.0.chromium.crx", null);
+  const { filename } = env.files.get(1);
+  assert.match(filename, /^[A-Za-z0-9_-]+$/, filename);
+  assert.match(filename, /^Example-1_0-\d+$/, "names the extension and version");
 });

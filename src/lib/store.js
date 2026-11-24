@@ -3,8 +3,13 @@
 //   "key:owner/name"   base64 PKCS#8 RSA signing key for zip assets; written
 //                      once, kept when the repo is no longer tracked (retained
 //                      key), deleted only together with an uninstall
+//   "keydelete:owner/name"  { at }: the repo's key is deleted once no pending
+//                      install signed with it remains (removeRepo with uninstall)
+//   "filekey:<extension ID>"  base64 PKCS#8 key of a zip installed from a file
+//                      without a repo; written once, moved to "key:" when tracked
 //   "install:<token>"  a CRX handed to the browser, until its install is
 //                      confirmed and its downloaded copy deleted (manager.js)
+//   "settings"         { githubToken, theme, observedScheme }
 //   "schema"           storage format version (SCHEMA)
 // Every read-modify-write runs inside withStateLock, a Web Lock shared by the
 // service worker and the extension pages, so no write is based on a stale read.
@@ -15,9 +20,11 @@ import { deriveTemplate, parseRepo, validateTemplate, VERSION_TOKEN } from "./re
 export const REPO_PREFIX = "repo:";
 export const KEY_PREFIX = "key:";
 export const INSTALL_PREFIX = "install:";
+export const KEY_DELETE_PREFIX = "keydelete:";
+export const FILE_KEY_PREFIX = "filekey:";
 export const SCHEMA = 2;
 export const BACKUP_FORMAT = "extainium-backup";
-export const BACKUP_VERSION = 2;
+export const BACKUP_VERSION = 3;
 const LOCK_NAME = "extainium-state";
 
 export const repoKey = (r) => `${r.owner}/${r.repo}`.toLowerCase();
@@ -30,8 +37,10 @@ export function withStateLock(fn) {
 // Record: { owner, repo, template, includePrereleases, extensionId,
 //   installed: { tag, digest, version } | null  (confirmed by management.onInstalled),
 //   identityChange: { from, to, tag, asset } | null  (relink waiting for confirmation),
-//   releases, pages, checkedAt, error, addedAt }
-// releases and pages are the release cache of the last check.
+//   releases, pages, feed, checkedCriteria, checkedAt, error, addedAt }
+// releases and pages are the release cache of the last full check (API);
+// feed (the releases.atom entries it saw) and checkedCriteria ({ template,
+// includePrereleases } it used) decide whether the next check needs the API.
 export function newRecord(owner, repo) {
   return {
     owner,
@@ -43,6 +52,8 @@ export function newRecord(owner, repo) {
     identityChange: null,
     releases: null,
     pages: null,
+    feed: null,
+    checkedCriteria: null,
     checkedAt: null,
     error: null,
     addedAt: Date.now(),
@@ -85,6 +96,21 @@ export async function listInstalls() {
   return (await byPrefix(INSTALL_PREFIX)).map(([, v]) => v);
 }
 
+// Repo keys whose signing key waits for deletion.
+export async function listKeyDeletions() {
+  return (await byPrefix(KEY_DELETE_PREFIX)).map(([k]) => k.slice(KEY_DELETE_PREFIX.length));
+}
+
+export async function getFileKey(extensionId) {
+  const k = FILE_KEY_PREFIX + extensionId;
+  return (await chrome.storage.local.get(k))[k] || null;
+}
+
+// { "<extension ID>": base64 PKCS#8 } of every file key.
+export async function listFileKeys() {
+  return Object.fromEntries((await byPrefix(FILE_KEY_PREFIX)).map(([k, v]) => [k.slice(FILE_KEY_PREFIX.length), v]));
+}
+
 // Writes; call only inside withStateLock.
 
 export function putRepo(record) {
@@ -105,6 +131,26 @@ export async function putSigningKeyIfAbsent(key, pkcs8) {
 
 export function removeSigningKey(key) {
   return chrome.storage.local.remove(KEY_PREFIX + key);
+}
+
+export function markKeyForDeletion(key) {
+  return chrome.storage.local.set({ [KEY_DELETE_PREFIX + key]: { at: Date.now() } });
+}
+
+export function removeKeyDeletion(key) {
+  return chrome.storage.local.remove(KEY_DELETE_PREFIX + key);
+}
+
+// Writes a file key unless one is stored for the ID. Returns the stored key.
+export async function putFileKeyIfAbsent(extensionId, pkcs8) {
+  const current = await getFileKey(extensionId);
+  if (current) return current;
+  await chrome.storage.local.set({ [FILE_KEY_PREFIX + extensionId]: pkcs8 });
+  return pkcs8;
+}
+
+export function removeFileKey(extensionId) {
+  return chrome.storage.local.remove(FILE_KEY_PREFIX + extensionId);
 }
 
 export function putInstall(entry) {
@@ -130,15 +176,43 @@ export function patchRepo(key, patch) {
   return updateRepo(key, (r) => ({ ...r, ...patch }));
 }
 
+// theme: "system" | "light" | "dark", the colour scheme the UI uses.
+// observedScheme: "light" | "dark" | null, what prefers-color-scheme reported
+// in the options page (a tab); the popup, whose own report can differ, uses it
+// while theme is "system".
 export async function getSettings() {
   const { settings } = await chrome.storage.local.get("settings");
-  return { githubToken: "", ...settings };
+  return { githubToken: "", theme: "system", observedScheme: null, ...settings };
 }
 
 export function setSettings(patch) {
   return withStateLock(async () => {
     await chrome.storage.local.set({ settings: { ...(await getSettings()), ...patch } });
   });
+}
+
+export const THEMES = ["system", "light", "dark"];
+const SCHEMES = ["light", "dark"];
+
+// { theme, observedScheme, scheme }: scheme is the scheme to show, "light" or
+// "dark", or null when theme is "system" and no scheme was observed yet.
+export async function getTheme() {
+  const { theme, observedScheme } = await getSettings();
+  return { theme, observedScheme, scheme: theme === "system" ? observedScheme : theme };
+}
+
+export async function setTheme(theme) {
+  if (!THEMES.includes(theme)) throw new Error(`set theme: not one of ${THEMES.join(", ")}: ${JSON.stringify(theme)}`);
+  return setSettings({ theme });
+}
+
+// Records the scheme a tab's matchMedia reports. Writes only on a change, so
+// pages that re-render on storage changes are not woken on every load.
+export async function recordObservedScheme(scheme) {
+  if (!SCHEMES.includes(scheme)) throw new Error(`record observed scheme: not light or dark: ${JSON.stringify(scheme)}`);
+  if ((await getSettings()).observedScheme === scheme) return false;
+  await setSettings({ observedScheme: scheme });
+  return true;
 }
 
 // ---- Stored format 0.1 (no schema key) -> SCHEMA 2 ----
@@ -245,8 +319,9 @@ export function migrateStorage() {
 
 // ---- Backups ----
 
-// Backup of the configuration (no release caches) and every signing key, retained ones included.
-export function makeBackup(records, keys, now = new Date()) {
+// Backup of the configuration (no release caches), every repo signing key,
+// retained ones included, and the file keys ({ "<extension ID>": pkcs8 }).
+export function makeBackup(records, keys, now = new Date(), fileKeys = {}) {
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
@@ -261,6 +336,7 @@ export function makeBackup(records, keys, now = new Date()) {
       addedAt: r.addedAt,
     })),
     keys,
+    fileKeys,
   };
 }
 
@@ -277,8 +353,10 @@ async function checkKey(where, b64) {
   return extensionIdFromSpki(spki);
 }
 
-// Validates a backup (format 1 or 2) against the full schema and returns
-// { repos: [records without caches], keys: { "owner/name": pkcs8 }, warnings: [] }.
+// Validates a backup (format 1, 2 or 3) against the full schema and returns
+// { repos: [records without caches], keys: { "owner/name": pkcs8 },
+//   fileKeys: { "<extension ID>": pkcs8 }, warnings: [] }.
+// Version 3 adds fileKeys; each must derive the ID it is filed under.
 // Throws "import backup: ..." naming the entry, field and value on the first problem.
 export async function parseBackup(text) {
   let data;
@@ -287,13 +365,22 @@ export async function parseBackup(text) {
   } catch (e) {
     throw new Error(`import backup: not JSON (${e.message})`);
   }
-  if (!data || typeof data !== "object" || data.format !== BACKUP_FORMAT || (data.version !== 1 && data.version !== 2)) {
-    throw new Error(`import backup: not an ${BACKUP_FORMAT} version 1 or 2 file`);
+  if (!data || typeof data !== "object" || data.format !== BACKUP_FORMAT || ![1, 2, 3].includes(data.version)) {
+    throw new Error(`import backup: not an ${BACKUP_FORMAT} version 1, 2 or 3 file`);
   }
   if (!Array.isArray(data.repos)) throw new Error("import backup: repos is not a list");
   const keys = {};
+  const fileKeys = {};
   const warnings = [];
-  if (data.version === 2) {
+  if (data.version === 3) {
+    if (!data.fileKeys || typeof data.fileKeys !== "object" || Array.isArray(data.fileKeys)) throw new Error("import backup: fileKeys is not an object");
+    for (const [id, b64] of Object.entries(data.fileKeys)) {
+      const derived = await checkKey(`import backup: fileKeys["${id}"]`, b64);
+      if (derived !== id) throw new Error(`import backup: fileKeys["${id}"]: the key is the key of extension ${derived}`);
+      fileKeys[id] = b64;
+    }
+  }
+  if (data.version >= 2) {
     if (!data.keys || typeof data.keys !== "object" || Array.isArray(data.keys)) throw new Error("import backup: keys is not an object");
     for (const [k, b64] of Object.entries(data.keys)) {
       const [owner, repo] = k.split("/");
@@ -332,7 +419,7 @@ export async function parseBackup(text) {
     }
     if (r.addedAt !== undefined && !Number.isFinite(r.addedAt)) throw new Error(`${where}: addedAt is not a number: ${show(r.addedAt)}`);
     let template;
-    if (data.version === 2) {
+    if (data.version >= 2) {
       template = r.template;
       if (template !== null) {
         try {
@@ -363,5 +450,5 @@ export async function parseBackup(text) {
   // A key need not derive the repo's extension ID: a retained zip key stays
   // after an explicit switch to the author's CRX. A pairing that does not fit
   // the installed extension ends in an identity change at the next link.
-  return { repos, keys, warnings };
+  return { repos, keys, fileKeys, warnings };
 }

@@ -1,0 +1,7 @@
+{
+  "signed-rsa.crx": "nabaimkkjheplopclmmpnjiiomjcoied",
+  "signed-ecdsa.crx": "eodjecdgbiigklkiljonabmikhmlcjhk",
+  "signed-wrong-key.crx": "nabaimkkjheplopclmmpnjiiomjcoied",
+  "signed-extra-bad-proof.crx": "nabaimkkjheplopclmmpnjiiomjcoied",
+  "signed-no-id-proof.crx": "nabaimkkjheplopclmmpnjiiomjcoied"
+}
