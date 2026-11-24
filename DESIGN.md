@@ -30,3 +30,8 @@ Single column, max 720px, fluid padding clamp(12px, 4vw, 24px). Sticky header: n
 - States: empty (dashed box with next step), checking (spinner in Check all + header progress line), busy card (top progress line + step text), card error / check error (red tinted box on the card), toast (dark, success auto-hides after 6 s, errors stay until dismissed).
 - Motion: press scale 0.97 / 120 ms; sheet 240 ms ease-out; toast 200 ms transition; all reduced under prefers-reduced-motion.
 - Open for the build: none.
+
+## Popup and icon
+
+- Popup: brand row, a status circle with the headline (update count / All up to date / No tracked extensions), a last-check line, one card listing the repos with updates (48px avatar, installed → latest), an inline error box, then Check now and Open Extainium.
+- Icon: an accent-blue block with one connector knob and a white up arrow. Source `src/icons/icon.svg`; the PNGs are made with `rsvg-convert -w N -h N src/icons/icon.svg -o src/icons/icon-N.png` for N = 16, 32, 48, 128.

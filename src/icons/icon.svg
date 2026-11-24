@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Extainium mark: an extension block (one connector knob) with an update arrow. Source for icon-16/32/48/128.png. -->
+  <path fill="#0b57d0" d="M26 12h56a20 20 0 0 1 20 20v12a20 20 0 0 1 0 40v12a20 20 0 0 1-20 20H26A20 20 0 0 1 6 96V32a20 20 0 0 1 20-20Z"/>
+  <path fill="none" stroke="#fff" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" d="M54 95V40M32 62l22-22 22 22"/>
+</svg>
