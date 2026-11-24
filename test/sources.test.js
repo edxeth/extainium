@@ -19,7 +19,7 @@ import {
 } from "./helpers/fake-update.js";
 
 const {
-  addRepo, checkAll, dismissInstallBlocked, environment, exportBackup, importBackup, installFile, installRelease,
+  addRepo, checkAll, checkRepo, dismissInstallBlocked, environment, exportBackup, importBackup, installFile, installRelease,
   installedOverview, linkInstalledToGithub, setTemplate, trackInstalled, trackedView,
 } = manager;
 
@@ -150,6 +150,7 @@ test("a store answer of noupdate shows the extension as not offered, keeps the m
     [`cws:${SUSPENDER}`, "not-offered", null, { malware: true }],
   ]);
   assert.equal(views[0].title, "uBlock Origin");
+  assert.deepEqual(views.map((v) => v.canInstall), [false, false]);
   await assert.rejects(installRelease(`cws:${MV2_UBO}`), /^Error: install cws:\w+: the Chrome Web Store offers no build of this extension to this browser$/);
   assert.equal(env.handedOff.length, 0);
 });
@@ -187,6 +188,26 @@ test("a failed store request gives each record of it an error naming the record 
   assert.deepEqual(errors, [`check ${JB_KEY}: HTTP 503 from clients2.google.com`]);
   assert.equal(env.store[`repo:${JB_KEY}`].error, errors[0]);
   assert.ok(env.store["repo:o/r"].releases, "the GitHub record was checked");
+});
+
+// Designer's report (parent request m-3c386688): "Last checked … · 1 error"
+// counts the records whose last check failed, also after a card's own check
+// or a removal fixed or dropped one; its time stays checkAll's.
+test("lastCheck's errors follow the records' errors after a card's check and a removal", async () => {
+  const env = profile();
+  fakeGithub([]);
+  env.store[`repo:${JB_KEY}`] = newSourceRecord("cws", JUST_BLACK);
+  env.store[`repo:cws:${DARK_READER}`] = newSourceRecord("cws", DARK_READER);
+  fakeUpdateServers({ status: 503 });
+  await checkAll();
+  const { at } = env.store.lastCheck;
+  assert.equal(env.store.lastCheck.errors.length, 2);
+  fakeUpdateServers({ cws: { [JUST_BLACK]: REAL_APPS.get(JUST_BLACK) } });
+  await checkRepo(JB_KEY);
+  assert.deepEqual(env.store.lastCheck.errors, [`check cws:${DARK_READER}: HTTP 503 from clients2.google.com`]);
+  assert.equal(env.store.lastCheck.at, at, "still the time of the last full check");
+  await manager.removeRepo(`cws:${DARK_READER}`);
+  assert.deepEqual(env.store.lastCheck.errors, []);
 });
 
 test("a store answer that lists an extension not asked for is refused", async () => {
@@ -229,9 +250,13 @@ test("tracking a self-hosted extension needs its host, then reads its update.xml
   assert.deepEqual({ kind: row.kind, canTrack: row.canTrack, needsOrigins: row.needsOrigins, updateHost: row.updateHost, trackedKey: row.trackedKey },
     { kind: "selfUpdating", canTrack: "updateUrl", needsOrigins: ["https://cdn.jsdelivr.net/*"], updateHost: "cdn.jsdelivr.net", trackedKey: null });
   await assert.rejects(trackInstalled(UBO), /^Error: check url:\w+: no host permission for https:\/\/cdn\.jsdelivr\.net\/\*$/);
-  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("repo:")), []);
+  // Review F2 (owner decision): a missing permission does not delete the new
+  // record; it keeps the error and the view asks for the origin.
+  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("repo:")), [`repo:url:${UBO}`]);
+  assert.deepEqual((await trackedView())[0].needsOrigins, ["https://cdn.jsdelivr.net/*"]);
+  assert.deepEqual(servers.requests, [], "nothing fetched without the permission");
   env.granted.add("https://cdn.jsdelivr.net/*");
-  assert.equal(await trackInstalled(UBO), `url:${UBO}`);
+  await checkRepo(`url:${UBO}`).then(manager.refreshBadge); // as the card's check does
   assert.deepEqual(servers.requests, [`${UBO_UPDATE_URL}?x=id%3D${UBO}%26v%3D1.76.0%26uc`]);
   const [view] = await trackedView();
   assert.equal(view.source, "updateUrl");
@@ -258,7 +283,7 @@ test("installing a self-hosted record verifies the CRX's ID and version and hand
   fakeGithub([]);
   serveUpdate({ appid: RSA_ID, version: "1.0", codebase: "https://example.org/ext/x.crx", crx: RSA_CRX });
   const key = await trackInstalled(RSA_ID);
-  assert.equal((await trackedView())[0].state, "update");
+  assert.deepEqual([(await trackedView())[0].state, (await trackedView())[0].canInstall], ["update", true]);
   assert.deepEqual(await installRelease(key), { extensionId: RSA_ID, version: "1.0", name: "Example" });
   assert.deepEqual(env.handedOff, [RSA_CRX]);
   await browserInstalls(env, RSA_ID, "1.0");
@@ -290,11 +315,82 @@ test("noupdate for the installed version is current; an update.xml without the e
   const [view] = await trackedView();
   assert.equal(view.state, "current");
   assert.equal(view.latest.version, "0.9");
+  // Review F6: the view says that no downloadable build exists (no Reinstall).
+  assert.deepEqual([view.latest.codebase, view.canInstall], [null, false]);
   await assert.rejects(installRelease(`url:${RSA_ID}`), /^Error: install url:\w+: the update server offers nothing newer than the installed version 0\.9$/);
   assert.equal(servers.requests.length, 2, "the install checked again");
   fakeUpdateServers({ files: { [SELF_URL]: xml(ECDSA_ID) } });
   const { errors } = await checkAll();
   assert.deepEqual(errors, [`check url:${RSA_ID}: example.org lists no update for this extension`]);
+});
+
+// ---- redirects to hosts without a permission (review F2) ----
+// Chromium follows a redirect for an extension only to a host it holds a
+// permission for, else fetch fails without saying why (measured, see
+// fakeUpdateServers). Owner decision: the error names the destination's
+// origin, the record remembers it and its view asks for it.
+
+const MIRROR = "https://mirror.example.net/ext/update.xml";
+test("an update check redirected to a host without a permission names that origin, keeps the new record and asks for the origin", async () => {
+  const env = profile({ extensions: [selfHosted(RSA_ID, "0.9")] });
+  env.granted.add("https://example.org/*");
+  fakeGithub([]);
+  fakeUpdateServers({
+    redirects: { [SELF_URL]: MIRROR },
+    files: { [MIRROR]: updatesXml({ appid: RSA_ID, version: "1.0", codebase: "https://example.org/ext/x.crx" }) },
+  });
+  await assert.rejects(trackInstalled(RSA_ID),
+    new RegExp(`^Error: check url:${RSA_ID}: example\\.org redirects to mirror\\.example\\.net, and there is no host permission for https://mirror\\.example\\.net/\\*$`));
+  let [view] = await trackedView();
+  assert.equal(view.key, `url:${RSA_ID}`, "the new record is kept");
+  assert.match(view.record.error, /redirects to mirror\.example\.net/);
+  assert.deepEqual(view.needsOrigins, ["https://mirror.example.net/*"]);
+  env.granted.add("https://mirror.example.net/*");
+  await checkRepo(`url:${RSA_ID}`);
+  [view] = await trackedView();
+  assert.deepEqual([view.needsOrigins, view.record.error, view.state, view.latest.version], [[], null, "update", "1.0"]);
+});
+
+test("a CRX download redirected to a host without a permission names that origin and hands off nothing; granted, it installs", async () => {
+  const env = profile({ extensions: [selfHosted(RSA_ID, "0.9")] });
+  env.granted.add("https://example.org/*");
+  fakeGithub([]);
+  const codebase = "https://example.org/ext/x.crx";
+  const blob = "https://objects.example.net/blob/x.crx";
+  fakeUpdateServers({ files: { [SELF_URL]: updatesXml({ appid: RSA_ID, version: "1.0", codebase }), [blob]: RSA_CRX }, redirects: { [codebase]: blob } });
+  const key = await trackInstalled(RSA_ID);
+  await assert.rejects(installRelease(key),
+    new RegExp(`^Error: download ${key} 1\\.0: example\\.org redirects to objects\\.example\\.net, and there is no host permission for https://objects\\.example\\.net/\\*$`));
+  assert.equal(env.handedOff.length, 0);
+  assert.deepEqual((await trackedView())[0].needsOrigins, ["https://objects.example.net/*"]);
+  env.granted.add("https://objects.example.net/*");
+  assert.deepEqual(await installRelease(key), { extensionId: RSA_ID, version: "1.0", name: "Example" });
+  assert.deepEqual(env.handedOff, [RSA_CRX]);
+});
+
+test("without the webRequest API a redirect that fails asks for https://*/*; a redirect to http is refused as not https", async () => {
+  const env = profile({ extensions: [selfHosted(RSA_ID, "0.9")] });
+  env.granted.add("https://example.org/*");
+  delete globalThis.chrome.webRequest;
+  fakeGithub([]);
+  fakeUpdateServers({
+    redirects: { [SELF_URL]: MIRROR },
+    files: { [MIRROR]: updatesXml({ appid: RSA_ID, version: "1.0", codebase: "https://example.org/ext/x.crx" }) },
+  });
+  await assert.rejects(trackInstalled(RSA_ID),
+    new RegExp(`^Error: check url:${RSA_ID}: example\\.org redirects to a host the browser does not name; there is no host permission for https://\\*/\\*$`));
+  assert.deepEqual((await trackedView())[0].needsOrigins, ["https://*/*"]);
+  env.granted.add("https://*/*");
+  await checkRepo(`url:${RSA_ID}`);
+  assert.deepEqual((await trackedView())[0].needsOrigins, []);
+
+  const http = profile({ extensions: [selfHosted(RSA_ID, "0.9")] });
+  http.granted.add("https://example.org/*");
+  fakeGithub([]);
+  fakeUpdateServers({ redirects: { [SELF_URL]: "http://example.org/ext/update.xml" } });
+  await assert.rejects(trackInstalled(RSA_ID),
+    new RegExp(`^Error: check url:${RSA_ID}: example\\.org redirects to http://example\\.org/ext/update\\.xml, which is not an https URL$`));
+  assert.deepEqual(Object.keys(http.store).filter((k) => k.startsWith("repo:")), [], "no permission can help: the record goes");
 });
 
 // ---- the Installed list ----
@@ -360,6 +456,7 @@ test("linking an unmanaged extension to a GitHub repo follows its ID; an asset o
   await setTemplate("o/r", "example.crx");
   [view] = await trackedView();
   assert.equal(view.state, "identity-change");
+  assert.equal(view.canInstall, true, "a matching asset exists (the identity change is the state's business)");
   assert.deepEqual([view.record.identityChange.from, view.record.identityChange.to], [PLAIN, otherId]);
 });
 
@@ -463,6 +560,46 @@ test("installBlocked stays unset on Android, with Titanium's helper, when the co
   assert.equal((await environment()).installBlocked, null, "installs work now");
 });
 
+// Review F9: the refusal check must not depend on the hand-off's page staying
+// open: the candidate is stored on the install entry and the sweep (service
+// worker) judges it.
+test("on desktop, a refused install whose page went away before its download ended is detected by the sweep", async () => {
+  const env = profile({ platform: "desktop" });
+  fakeGithub([]);
+  env.newDownloadState = "in_progress";
+  const { promise: started, resolve } = Promise.withResolvers();
+  env.onDownloadStarted = async () => resolve();
+  installFile(RSA_CRX, "x.crx"); // its page goes away below; it never ends
+  await started;
+  while (!env.changedListeners.size) await sleep(1);
+  env.locks.abandon(OP);
+  // No prompt held the download: it completed at once, the installer refused
+  // and deleted the copy, and no page heard of it.
+  const f = env.files.get(1);
+  Object.assign(f, { state: "complete", endTime: new Date(Date.parse(f.startTime) + 15).toISOString(), exists: false });
+  await manager.sweepDownloads();
+  const { installBlocked } = await environment();
+  assert.equal(installBlocked && installBlocked.hint, "flag");
+});
+
+test("on desktop, a refused install whose copy vanished after its page's check is detected by the sweep; a copy that stays is not", async () => {
+  const env = profile({ platform: "desktop" });
+  fakeGithub([]);
+  await quickRefusedInstall(env, { fileGone: false }); // the page's check still sees the copy
+  assert.equal((await environment()).installBlocked, null);
+  env.files.get(1).exists = false; // the installer deleted it later; the page is gone
+  await manager.sweepDownloads();
+  assert.equal((await environment()).installBlocked?.hint, "flag");
+
+  const kept = profile({ platform: "desktop" });
+  fakeGithub([]);
+  await quickRefusedInstall(kept, { fileGone: false });
+  await manager.sweepDownloads(Date.now() + manager.PENDING_GRACE_MS + 1000);
+  assert.deepEqual(kept.removed, [1], "the copy outlived the prompt's grace period and was deleted");
+  await manager.sweepDownloads(Date.now() + 2 * manager.PENDING_GRACE_MS);
+  assert.equal((await environment()).installBlocked, null);
+});
+
 // ---- backup format 4 ----
 
 test("a backup carries CWS and update-URL records and restores them; an existing record keeps its state", async () => {
@@ -492,6 +629,38 @@ test("a backup carries CWS and update-URL records and restores them; an existing
   fresh.store[`repo:${JB_KEY}`] = { ...fresh.store[`repo:${JB_KEY}`], name: "Kept" };
   await importBackup(text);
   assert.equal(fresh.store[`repo:${JB_KEY}`].name, "Kept");
+});
+
+// Review F4: one record per extension ID, as addRepo and trackInstalled keep it:
+// an incoming record of an ID that an existing or earlier imported record
+// follows is skipped with a warning.
+test("importing a backup skips a record whose extension ID another record already follows, with a warning", async () => {
+  const env = profile();
+  fakeGithub([]);
+  fakeUpdateServers({ cws: { [JUST_BLACK]: REAL_APPS.get(JUST_BLACK) } });
+  env.store["repo:o/r"] = { ...newRecord("o", "r"), extensionId: JUST_BLACK };
+  const backup = {
+    format: "extainium-backup", version: 4, exportedAt: "2026-11-24T00:00:00.000Z", keys: {}, fileKeys: {},
+    repos: [{ owner: "p", repo: "q", template: null, includePrereleases: false, extensionId: DARK_READER, installed: null, addedAt: 1 }],
+    sources: [
+      { source: "cws", id: JUST_BLACK, name: "Just Black", installed: null, addedAt: 1 },
+      { source: "cws", id: DARK_READER, name: "Dark Reader", installed: null, addedAt: 1 },
+      { source: "updateUrl", id: UBO, updateUrl: UBO_UPDATE_URL, name: "uBlock Origin", installed: null, addedAt: 1 },
+      { source: "cws", id: UBO, name: "uBlock Origin", installed: null, addedAt: 1 },
+    ],
+  };
+  const { count, warnings } = await importBackup(JSON.stringify(backup));
+  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("repo:")).sort(), ["repo:o/r", "repo:p/q", `repo:url:${UBO}`]);
+  assert.deepEqual(warnings, [
+    `cws:${JUST_BLACK}: extension ${JUST_BLACK} is already tracked as o/r; cws:${JUST_BLACK} was not imported`,
+    `cws:${DARK_READER}: extension ${DARK_READER} is already tracked as p/q; cws:${DARK_READER} was not imported`,
+    `cws:${UBO}: extension ${UBO} is already tracked as url:${UBO}; cws:${UBO} was not imported`,
+  ]);
+  assert.equal(count, 2, "the records imported");
+  // A backup of the same profile, imported again, changes nothing and warns about nothing.
+  const again = await importBackup(await exportBackup());
+  assert.deepEqual(again.warnings, []);
+  assert.deepEqual(Object.keys(env.store).filter((k) => k.startsWith("repo:")).sort(), ["repo:o/r", "repo:p/q", `repo:url:${UBO}`]);
 });
 
 test("a version 4 backup with a malformed source entry is refused naming the entry and field", async () => {

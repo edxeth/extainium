@@ -25,7 +25,7 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
     locks: installFakeLocks(),
     store: {},
     extensions: extensions.map(clone),
-    files: new Map(), // downloadId -> { filename, bytes, state: "in_progress"|"complete"|"interrupted", exists }
+    files: new Map(), // downloadId -> { filename, bytes, state: "in_progress"|"complete"|"interrupted", exists, startTime, endTime? (ISO) }
     handedOff: [], // CRX bytes passed to chrome.downloads.download, in order
     removed: [],
     erased: [],
@@ -41,6 +41,7 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
     newDownloadState: "complete", // state a new download starts in
     changedListeners: new Set(),
     erasedListeners: new Set(),
+    redirectListeners: new Set(), // chrome.webRequest.onBeforeRedirect listeners
     // Dispatches chrome.downloads.onChanged / onErased to the registered listeners.
     emitChanged(delta) { for (const l of [...env.changedListeners]) l(delta); },
     emitErased(id) { for (const l of [...env.erasedListeners]) l(id); },
@@ -106,6 +107,15 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       getManifest: () => ({ manifest_version: 3, name: "Extainium", version: env.manifestVersion }),
       getPlatformInfo: async () => ({ os: env.platformOs, arch: "arm64" }),
     },
+    // Without a "webRequest" permission (or on a browser without the API) a test deletes it.
+    // dispatch (fake only) delivers { requestId, url, redirectUrl } to the listeners.
+    webRequest: {
+      onBeforeRedirect: {
+        addListener: (l) => env.redirectListeners.add(l),
+        removeListener: (l) => env.redirectListeners.delete(l),
+        dispatch: (details) => { for (const l of [...env.redirectListeners]) l(details); },
+      },
+    },
     action: {
       setBadgeBackgroundColor: async () => {},
       setBadgeText: async ({ text }) => { env.badge = text; },
@@ -118,7 +128,8 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       download: async ({ url, filename }) => {
         const bytes = new Uint8Array(await (await nativeFetch(url)).arrayBuffer());
         const id = env.nextDownloadId++;
-        env.files.set(id, { filename, bytes, state: env.newDownloadState, exists: true });
+        const startTime = new Date().toISOString();
+        env.files.set(id, { filename, bytes, state: env.newDownloadState, exists: true, startTime, ...(env.newDownloadState === "complete" ? { endTime: startTime } : {}) });
         env.handedOff.push(bytes);
         if (env.onDownloadStarted) await env.onDownloadStarted(id);
         return id;
@@ -126,7 +137,7 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       search: async ({ id }) => {
         if (env.searchHook) await env.searchHook(id);
         const f = env.files.get(id);
-        return f ? [{ id, filename: f.filename, state: f.state, danger: "safe", exists: f.exists }] : [];
+        return f ? [{ id, filename: f.filename, state: f.state, danger: "safe", exists: f.exists, startTime: f.startTime, endTime: f.endTime }] : [];
       },
       onChanged: { addListener: (l) => env.changedListeners.add(l), removeListener: (l) => env.changedListeners.delete(l) },
       onErased: { addListener: (l) => env.erasedListeners.add(l), removeListener: (l) => env.erasedListeners.delete(l) },
