@@ -2,51 +2,65 @@
 
 Install and update browser extensions from GitHub releases, the way
 [Obtainium](https://github.com/ImranR98/Obtainium) does for Android apps. Built for
-[Titanium Browser for Android](https://github.com/jqssun/android-titanium-browser).
+[Titanium Browser for Android](https://github.com/jqssun/android-titanium-browser),
+a Chromium browser with desktop extension support.
 
-- Track a GitHub repo (`owner/repo` or any github.com URL of it), pick the release
-  asset (`.crx` or `.zip`) once; a file name template such as
-  `uBlock0_{version}.chromium.crx` (`{version}` for the version, `*` for any text)
-  finds it in later releases.
-- See installed vs. latest version, release date and notes; a check runs every 6
-  hours (and on demand), and the toolbar badge counts available updates. A check
-  first reads the repo's `releases.atom` feed, which costs no GitHub API quota,
-  and skips the API only when the feed shows nothing it could have missed: the
-  release selected last time is in the feed with the update time the API
-  reported, and the feed's entries (ids and update times) are exactly those the
-  last full check saw. A full API check also runs when the release cache is
-  empty, the asset template or pre-release setting changed, the last one is more
-  than 24 hours old, or the feed is unavailable or not in GitHub's plain Atom
-  form.
-- Install or update with one tap. A `.crx` keeps its author's key and extension ID;
-  its CRX3 signatures (RSA and ECDSA P-256) are verified as Chromium does before
-  it is handed to the browser, and a damaged or altered file is refused.
-  A `.zip` is packed into a CRX signed with a key Extainium creates once per repo,
-  so updates keep the same extension ID and its data.
-- Install a local `.crx`/`.zip` and optionally track it with a repo. A local `.zip`
-  can be signed with a tracked repo's key, with the key of an earlier untracked
-  file install, or with a new key. The key of a `.zip` installed without a repo is
-  kept (and exported) until the file is tracked with a repo, which takes it over
-  (if that repo's first check fails, the key goes back to the file keys), or
-  until you forget it under Files & settings > Kept keys; a `.zip` signed for
-  that extension later installs as a different extension. A key is stored in
-  one place only: an import does not give a key another repo owns to a second
-  repo.
-  A local `.crx` keeps its author's key and never changes which extension a
-  tracked repo follows.
-- Export/import the list, including the per-repo signing keys and the keys of
-  untracked file installs (backup format 3; files of format 1 and 2 still
-  import). Removing a repo keeps its key (it re-attaches if the repo is added
-  again); only "remove and uninstall" deletes it, and only once no install
-  signed with it is still downloading or waiting at the browser's prompt (at
-  most two minutes after its download completed). An import never replaces a
-  different stored key.
+## Install
+
+1. Download `extainium.crx` from the [latest release](../../releases/latest).
+2. In Titanium, open the extensions menu > **Titanium** > **Options** and use
+   **Install from file** to pick the downloaded file. Accept the "Add extension"
+   prompt.
+3. Extainium updates itself from this repo's latest release.
+
+Titanium's Safety Check may list Extainium as an extension it "can't verify",
+as it does for any extension not installed from a store.
+
+## Use
+
+- **Track a repo:** type `owner/repo` or paste any github.com link of it, then
+  pick the release file (`.crx` or `.zip`). Extainium remembers a file
+  name template such as `uBlock0_{version}.chromium.crx` (`{version}` for the
+  version, `*` for any text) to find the same file in later releases.
+- **Updates:** a check runs every 6 hours and on demand (**Check all**); the
+  toolbar badge counts available updates. Tap **Update** on a card; Titanium
+  asks once to add the extension.
+- **Pre-releases:** off by default; turn on **Include pre-releases** per repo under
+  **More**. **Install a specific release** there installs any listed release.
+- **Install from file:** install a local `.crx` or `.zip` and optionally track it
+  with a repo afterwards.
+- **Backup:** **Files & settings** > **Export** saves the list and signing keys;
+  **Import** restores it.
+- **Theme:** System, Light or Dark under **Files & settings**.
+- **GitHub token (optional):** raises GitHub's limit from 60 to 5000 API requests
+  per hour. A fine-grained token with no permissions is enough for public repos.
+
+## How it works
+
+- A `.crx` keeps its author's key and extension ID. Its CRX3 signatures (RSA
+  and ECDSA P-256) are verified as Chromium does before install; a damaged or
+  altered file is refused.
+- A `.zip` is packed into a CRX signed with a key Extainium creates once per
+  repo, so updates keep the same extension ID and the extension's data. The
+  key of a `.zip` installed from a file without a repo is kept under
+  **Files & settings** > **Kept keys** until the file is tracked or the key is
+  forgotten.
+- Removing a repo keeps its key, and it re-attaches if the repo is added again.
+  Only **Remove and uninstall** deletes it (two taps), once no install signed
+  with it is still downloading or waiting at the browser's prompt. An import
+  never replaces a stored key with a different one.
+- A check first reads the repo's `releases.atom` feed, which costs no API
+  quota, and calls the GitHub API only when the feed shows a change, the asset
+  template or pre-release setting changed, the last full check is over 24 hours
+  old, or the feed is unavailable or not in GitHub's plain Atom form.
+- A release or file that would install under a different extension ID than the
+  installed one waits for your confirmation, because the extension's data does
+  not carry over.
 - Actions run one at a time across the options page, the popup and the
-  background check: an install holds the others until its download has
-  completed (not until you answer the browser's prompt). An action that has
-  to wait says "Waiting for another action…".
+  background check. An action that has to wait says "Waiting for another
+  action…".
 
-## How it installs
+### How the install works on Titanium
 
 Titanium allows off-store CRX installs when the download is started by an
 extension page. Extainium downloads the CRX through `chrome.downloads`; Titanium
@@ -70,64 +84,48 @@ never while the download is still running. A release or file that would
 install under another extension ID than the installed one waits for your
 confirmation.
 
-## Known limitations
-
-- On Titanium a saved backup did not show up in `chrome.downloads.search`
-  afterwards, although the browser reported the download complete and the file
-  was in Downloads. Chromium 158's source shows no path that hides such a download
-  (the location dialog keeps the same download item; search hides only temporary
-  and internal downloads); the cause is open. Extainium reports the export from
-  the download's own events; a search may only add a result and never delays it. If no end is
-  reported within two minutes, it says it could not confirm the save.
-- The extension-less CRX file name that avoids the "Confirm download / Keep"
-  step follows from Chromium's source and still needs a check on the phone.
-
 ## Privacy
 
-Extainium talks to `api.github.com` and GitHub's release download hosts only. An
-optional GitHub token (raises the API limit from 60 to 5000 requests per hour) is
-kept in `chrome.storage.local` and sent only to `api.github.com`. The backup file
+Extainium connects only to GitHub: `api.github.com`, `github.com` (release
+feeds and download links) and GitHub's release download hosts
+(`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
+It sends no data anywhere else. The optional token is kept in
+`chrome.storage.local` and sent only to `api.github.com`. The backup file
 contains the signing keys of your `.zip`-based extensions: keep it private.
 Without those keys a reinstall gets a new extension ID and loses its data.
 
 ## Build
 
+Needs Node.js 22 or later, `zip`, and `python3` for one test.
+
 ```sh
 npm install
-npm test        # node --test, logic in src/lib
-python3 test/fixtures/make-zip-fixtures.py   # regenerates the zip fixtures
+npm test
 ./build.sh      # dist/extainium.zip and dist/extainium.crx
 ```
 
-`build.sh` signs the CRX with `~/.config/extainium/extainium.pem` (or
-`$EXTAINIUM_PEM`) and creates that key, mode 600, if it is missing. The key fixes
-Extainium's own extension ID; keep it to publish updates.
+`build.sh` signs the CRX with `$EXTAINIUM_PEM` (default
+`~/.config/extainium/extainium.pem`) and creates that key, mode 600, if it is
+missing. The key fixes the extension ID: a build signed with your own key is a
+separate extension from the published one.
 
-Self-hosted updates are prepared but off. Two optional environment variables,
-unset by default, turn them on:
-
-```sh
-EXTAINIUM_UPDATE_URL=https://host/extainium/updates.xml \
-EXTAINIUM_CODEBASE=https://host/extainium/extainium.crx ./build.sh
-```
+Two optional environment variables turn on self-hosted updates:
 
 - `EXTAINIUM_UPDATE_URL` is inserted as `update_url` into the built manifest
-  (`src/manifest.json` is not changed). The browser then polls that URL.
-- `EXTAINIUM_CODEBASE` makes the build write `dist/updates.xml`, the
-  [gupdate update manifest](https://developer.chrome.com/docs/extensions/how-to/distribute/host-on-linux#update_manifest)
-  with the extension ID derived from the signed CRX
-  (`jojihfmjoonfhnjlioapjefjmdcddgol` with the release key), the manifest version,
-  and the CRX URL.
+  (`src/manifest.json` is not changed). The browser polls that URL.
+- `EXTAINIUM_CODEBASE` is the URL of the published `extainium.crx`; the build
+  then writes `dist/updates.xml`, the
+  [update manifest](https://developer.chrome.com/docs/extensions/how-to/distribute/host-on-linux#update_manifest)
+  for it.
 
-Publish `dist/extainium.crx` at the codebase URL and `dist/updates.xml` at the
-update URL. A build without `update_url` cannot later learn one: the first build
-users install must carry it.
+`scripts/release.sh` sets both for this repo's GitHub releases, builds, and
+publishes `extainium.crx`, `extainium.zip` and `updates.xml` as release
+`v<version>` (needs `gh`, a clean pushed tree, and a new version in
+`src/manifest.json`).
 
-Layout: `src/lib/` holds the logic as ES modules shared by the extension and the
-tests (`crx.js` CRX3 parse/pack/ID, `zip.js`, `releases.js` repo parsing,
-versions, asset templates and update state, `github.js` API access, `store.js`
-storage and backup, `install.js`, `manager.js` operations). `src/options.*` and
-`src/popup.*` are the UI.
+Layout: `src/lib/` holds the logic as ES modules shared by the extension and
+the tests; `src/options.*` and `src/popup.*` are the UI; `DESIGN.md` records the
+UI decisions.
 
 ## Credits and license
 
