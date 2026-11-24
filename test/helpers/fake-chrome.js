@@ -2,10 +2,20 @@
 // Storage values are cloned on every read and write, as chrome.storage does.
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { installFakeLocks } from "./fake-locks.js";
 
 const clone = (v) => structuredClone(v);
 const nativeFetch = globalThis.fetch;
+// The host permissions the extension holds without asking (src/manifest.json).
+const REQUIRED_HOSTS = JSON.parse(readFileSync(new URL("../../src/manifest.json", import.meta.url), "utf8")).host_permissions;
+export const USER_AGENTS = {
+  android: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.8127.100 Mobile Safari/537.36",
+  desktop: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.79 Safari/537.36",
+};
+// Chrome's host permission check for an origin pattern "scheme://host/*",
+// for the pattern forms the extension uses.
+const grants = (pattern, origin) => pattern === origin || pattern === "<all_urls>" || (pattern === "https://*/*" && origin.startsWith("https://"));
 
 // hooks: { beforeSet(obj), beforeGet(keys) } may return a promise to delay the call.
 // Each call also installs fresh Web Locks (env.locks, see fake-locks.js), so a
@@ -39,7 +49,18 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
       env.extensions = env.extensions.filter((e) => e.id !== id);
       env.extensions.push({ id, version, name, enabled: true });
     },
+    granted: new Set(REQUIRED_HOSTS), // origin patterns held (chrome.permissions)
+    runtimeId: "jojihfmjoonfhnjlioapjefjmdcddgol", // chrome.runtime.id
+    manifestVersion: "0.1.18", // chrome.runtime.getManifest().version
+    platformOs: "android", // chrome.runtime.getPlatformInfo().os
+    userAgent: USER_AGENTS.android,
+    // "android" (Titanium) or "desktop" (Linux ungoogled-chromium).
+    setPlatform(kind) {
+      env.platformOs = kind === "android" ? "android" : "linux";
+      env.userAgent = USER_AGENTS[kind];
+    },
   };
+  Object.defineProperty(globalThis.navigator, "userAgent", { get: () => env.userAgent, configurable: true });
   const pick = (keys) => {
     if (keys === null || keys === undefined) return clone(env.store);
     const list = typeof keys === "string" ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys);
@@ -71,6 +92,19 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
         env.uninstalled.push(id);
         env.extensions = env.extensions.filter((e) => e.id !== id);
       },
+    },
+    permissions: {
+      getAll: async () => ({ permissions: [], origins: [...env.granted] }),
+      contains: async ({ origins = [] }) => origins.every((o) => [...env.granted].some((p) => grants(p, o))),
+      request: async ({ origins = [] }) => {
+        for (const o of origins) env.granted.add(o);
+        return true;
+      },
+    },
+    runtime: {
+      get id() { return env.runtimeId; },
+      getManifest: () => ({ manifest_version: 3, name: "Extainium", version: env.manifestVersion }),
+      getPlatformInfo: async () => ({ os: env.platformOs, arch: "arm64" }),
     },
     action: {
       setBadgeBackgroundColor: async () => {},

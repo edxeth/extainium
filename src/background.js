@@ -1,4 +1,4 @@
-import { SWEEP_ALARM, checkAll, handleExtensionInstalled, refreshBadge, sweepDownloads } from "./lib/manager.js";
+import { SWEEP_ALARM, checkAll, confirmOwnInstall, handleExtensionInstalled, refreshBadge, sweepDownloads } from "./lib/manager.js";
 
 const ALARM = "check-updates";
 const PERIOD_MINUTES = 6 * 60;
@@ -9,12 +9,17 @@ async function ensureAlarm() {
   }
 }
 
+// After Extainium installed a newer Extainium, the new instance confirms that
+// install (the old one was replaced before management.onInstalled reached it).
+const confirmSelf = () => confirmOwnInstall().catch((e) => console.error("[Extainium] confirm own install:", e));
+
 // The badge text does not survive a browser restart or an extension update.
-chrome.runtime.onInstalled.addListener(() => ensureAlarm().then(refreshBadge));
-chrome.runtime.onStartup.addListener(() => ensureAlarm().then(sweepDownloads).then(refreshBadge));
+chrome.runtime.onInstalled.addListener(() => confirmSelf().then(ensureAlarm).then(refreshBadge));
+chrome.runtime.onStartup.addListener(() => confirmSelf().then(ensureAlarm).then(sweepDownloads).then(refreshBadge));
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  // Check errors are kept in lastCheck and on each repo record, where the UI shows them.
+  // Checks every source (GitHub, Chrome Web Store, update URLs). Check errors
+  // are kept in lastCheck and on each record, where the UI shows them.
   if (alarm.name === ALARM) sweepDownloads().then(checkAll);
   else if (alarm.name === SWEEP_ALARM) sweepDownloads();
 });

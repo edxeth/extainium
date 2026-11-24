@@ -475,7 +475,7 @@ test("a zip installed from a file without a repo keeps its key: listed, exported
   assert.deepEqual((await fileKeysView())[0], { value: "file:" + f.extensionId, extensionId: f.extensionId, name: "Example", version: "1.0" });
   const text = await exportBackup();
   const backup = JSON.parse(text);
-  assert.equal(backup.version, 3);
+  assert.equal(backup.version, 4); // format 4 (sources) keeps version 3's fileKeys
   assert.deepEqual(backup.fileKeys, { [f.extensionId]: f.keyPkcs8 });
 
   const fresh = fakeChrome();

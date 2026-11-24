@@ -193,12 +193,19 @@ function ecdsaDerToRaw(der, size = 32) {
   return pos === der.length ? out : null;
 }
 
+// SHA-256 of the DER SPKI of Google's "ecdsa_2017_public" CRX3 publisher key:
+// kPublisherKeyHash in Chromium's components/crx_file/crx_verifier.cc. A
+// CRX served by the Chrome Web Store carries a proof made with this key.
+export const PUBLISHER_KEY_HASH = "61f7f2a6bfcf74cd0bc1fe2497cc9b04254c658f79f2145392867ea8366367cf";
+
 // Verifies a CRX3 file as Chromium's crx_verifier.cc (VerifyCrx3) does: every
 // RSA (PKCS#1 v1.5 SHA-256) and ECDSA (P-256 SHA-256) proof must verify over
 // "CRX3 SignedData\0" | u32le size | signed header data | archive, and one
 // proof's key must derive the crx_id the signed header declares.
+// publisherProof: also require a (verified) proof by Google's publisher key,
+// as Chromium's CRX3_WITH_PUBLISHER_PROOF format does for store installs.
 // what: the file's name for errors. Returns the extension ID.
-export async function verifyCrx(bytes, what = "CRX") {
+export async function verifyCrx(bytes, what = "CRX", { publisherProof = false } = {}) {
   const fail = (msg) => new Error(`verify ${what}: ${msg}`);
   let header;
   try {
@@ -213,6 +220,7 @@ export async function verifyCrx(bytes, what = "CRX") {
   const payload = concatBytes(SIGNATURE_CONTEXT, u32le(shd.length), shd, bytes.subarray(header.zipOffset));
   const proofs = [...header.rsa.map((p) => ["RSA", p]), ...header.ecdsa.map((p) => ["ECDSA", p])];
   let idProof = false;
+  let publisher = false;
   for (const [kind, { publicKey, signature }] of proofs) {
     if (!publicKey || !signature) throw fail(`an ${kind} proof lacks its key or signature`);
     const keyId = await extensionIdFromSpki(publicKey);
@@ -227,8 +235,10 @@ export async function verifyCrx(bytes, what = "CRX") {
     const ok = await crypto.subtle.verify(kind === "RSA" ? RSA : ECDSA_SIG, key, sig, payload);
     if (!ok) throw fail(`the ${kind} signature of key ${keyId} does not verify; the file is damaged or was altered`);
     if (keyId === id) idProof = true;
+    if (base16(await sha256(publicKey)) === PUBLISHER_KEY_HASH) publisher = true;
   }
   if (!idProof) throw fail(`no proof's key derives the declared extension ID ${id}`);
+  if (publisherProof && !publisher) throw fail("it has no Chrome Web Store publisher proof: no proof is signed with Google's publisher key");
   return id;
 }
 

@@ -161,6 +161,14 @@ const record = fc.record({
 });
 const lowerKey = (r) => `${r.owner}/${r.repo}`.toLowerCase();
 const records = fc.uniqueArray(record, { maxLength: 5, selector: lowerKey });
+// Version 4: CWS and update-URL records (keys "cws:<id>", "url:<id>").
+const httpsUrl = fc.tuple(fc.constantFrom("cdn.jsdelivr.net", "gitflic.ru", "github.com"), fc.stringMatching(/^[A-Za-z0-9._~-]{0,12}$/), fc.option(fc.stringMatching(/^[a-z]=[0-9]{1,3}$/), { nil: null }))
+  .map(([host, path, query]) => `https://${host}/${path}/update.xml${query ? "?" + query : ""}`);
+const sourceRecord = fc.oneof(
+  fc.record({ source: fc.constant("cws"), id, name: fc.option(fc.string({ maxLength: 30 }), { nil: null }), installed, addedAt: fc.integer({ min: 0, max: 2 ** 45 }) }),
+  fc.record({ source: fc.constant("updateUrl"), id, updateUrl: httpsUrl, name: fc.option(fc.string({ maxLength: 30 }), { nil: null }), installed, addedAt: fc.integer({ min: 0, max: 2 ** 45 }) }),
+);
+const sourceRecords = fc.uniqueArray(sourceRecord, { maxLength: 4, selector: (r) => `${r.source}:${r.id}` });
 // Keys for some tracked repos and for some repos that are no longer tracked (retained).
 const backupInput = fc.tuple(records, fc.array(fc.tuple(name, name), { maxLength: 2 }), fc.array(fc.nat(), { maxLength: 10 }), fc.array(fc.nat(), { maxLength: 3 }))
   .map(([recs, retained, picks, filePicks]) => {
@@ -170,12 +178,13 @@ const backupInput = fc.tuple(records, fc.array(fc.tuple(name, name), { maxLength
     return { recs, keys, fileKeys: fileKeysOf(filePicks) };
   });
 
-// Item 5: version 3 adds the file keys.
+// Item 5: version 3 adds the file keys; version 4 (sources contract) the CWS and update-URL records.
 test("property: a generated valid backup round-trips through export and parse", async () => {
   await fc.assert(
-    fc.asyncProperty(backupInput, async ({ recs, keys, fileKeys }) => {
-      const exported = makeBackup(recs, keys, new Date(0), fileKeys);
-      assert.equal(exported.version, 3);
+    fc.asyncProperty(backupInput, sourceRecords, async ({ recs, keys, fileKeys }, srcs) => {
+      const exported = makeBackup([...recs, ...srcs], keys, new Date(0), fileKeys);
+      assert.equal(exported.version, 4);
+      assert.equal(exported.sources.length, srcs.length);
       const parsed = await parseBackup(JSON.stringify(exported));
       assert.deepEqual(parsed.keys, keys);
       assert.deepEqual(parsed.fileKeys, fileKeys);

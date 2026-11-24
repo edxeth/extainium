@@ -36,6 +36,15 @@ stays dismissed across updates.
   asks once to add the extension.
 - **Pre-releases:** off by default; turn on **Include pre-releases** per repo under
   **More**. **Install a specific release** there installs any listed release.
+- **Chrome Web Store and self-hosted extensions:** paste a Chrome Web Store link
+  (or a 32-letter extension ID) into the same field, or track an installed
+  extension from the **Installed** list: store extensions update from the
+  store, extensions with their own update address (uBlock Origin's CRX,
+  Extainium itself) from that address. The browser asks once for access to
+  the store's or the update address's host. A store item that the store does
+  not offer to this browser (too old a browser, Manifest V2, removed or
+  flagged) is shown as not offered. Unmanaged installed extensions can be
+  linked to a GitHub repo.
 - **Install from file:** install a local `.crx` or `.zip` and optionally track it
   with a repo afterwards.
 - **Backup:** **Files & settings** > **Export** saves the list and signing keys;
@@ -49,6 +58,11 @@ stays dismissed across updates.
 - A `.crx` keeps its author's key and extension ID. Its CRX3 signatures (RSA
   and ECDSA P-256) are verified as Chromium does before install; a damaged or
   altered file is refused.
+- A Chrome Web Store update is checked against the store's answer (size and
+  SHA-256), must carry Google's publisher proof (Chromium's
+  `kPublisherKeyHash`) and the tracked extension ID; a self-hosted update must
+  have the tracked ID and the announced version. Update answers are read
+  strictly (gupdate XML); anything else is refused.
 - A `.zip` is packed into a CRX signed with a key Extainium creates once per
   repo, so updates keep the same extension ID and the extension's data. The
   key of a `.zip` installed from a file without a repo is kept under
@@ -69,6 +83,16 @@ stays dismissed across updates.
   background check. An action that has to wait says "Waiting for another
   action…". While Titanium's Add or uninstall prompt is open, other actions
   wait for your answer; closing the page releases them.
+
+### Desktop (ungoogled-chromium)
+
+The same hand-off installs on desktop ungoogled-chromium only with
+`chrome://flags/#extension-mime-request-handling` set to "Always prompt for
+install" (then relaunch). Without it the download completes and nothing
+installs; Extainium notices that (the browser deletes the copy at once) and
+says so. ungoogled-chromium does not update extensions by itself, so track
+store and self-hosted extensions, and Extainium itself, from the
+**Installed** list.
 
 ### How the install works on Titanium
 
@@ -96,10 +120,13 @@ confirmation.
 
 ## Privacy
 
-Extainium connects only to GitHub: `api.github.com`, `github.com` (release
+Extainium connects to GitHub: `api.github.com`, `github.com` (release
 feeds and download links) and GitHub's release download hosts
 (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
-It sends no data anywhere else. The optional token is kept in
+Only when you track such an extension, and after you allow the host, it also
+connects to the Chrome Web Store's update hosts (`clients2.google.com`,
+`clients2.googleusercontent.com`, without cookies) or to the extension's own
+update address. It sends no data anywhere else. The optional token is kept in
 `chrome.storage.local` and sent only to `api.github.com`. The backup file
 contains the signing keys of your `.zip`-based extensions: keep it private.
 Without those keys a reinstall gets a new extension ID and loses its data.

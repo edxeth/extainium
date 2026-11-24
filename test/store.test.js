@@ -35,7 +35,7 @@ test("a backup restores every record and signing key, without the release cache"
 });
 
 test("parseBackup rejects files that are not Extainium backups", async () => {
-  await assert.rejects(parseBackup("{}"), /not an extainium-backup version 1, 2 or 3 file/);
+  await assert.rejects(parseBackup("{}"), /not an extainium-backup version 1, 2, 3 or 4 file/);
   await assert.rejects(parseBackup("nope"), /not JSON/);
 });
 

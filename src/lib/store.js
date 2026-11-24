@@ -1,5 +1,9 @@
 // Extension state in chrome.storage.local:
 //   "repo:owner/name"  tracked repo record (see newRecord)
+//   "repo:cws:<id>", "repo:url:<id>"  tracked extension of the Chrome Web
+//                      Store or of a self-hosted update URL (newSourceRecord)
+//   "installBlocked"   { at, hint: "flag" }: a desktop install the browser
+//                      refused (manager.js environment)
 //   "key:owner/name"   base64 PKCS#8 RSA signing key for zip assets; written
 //                      once, kept when the repo is no longer tracked (retained
 //                      key), deleted only together with an uninstall
@@ -26,11 +30,15 @@ export const KEY_DELETE_PREFIX = "keydelete:";
 export const FILE_KEY_PREFIX = "filekey:";
 export const SCHEMA = 2;
 export const BACKUP_FORMAT = "extainium-backup";
-export const BACKUP_VERSION = 3;
+export const BACKUP_VERSION = 4;
 const LOCK_NAME = "extainium-state";
 const OP_LOCK_NAME = "extainium-op";
 
-export const repoKey = (r) => `${r.owner}/${r.repo}`.toLowerCase();
+// The key of a record: "owner/name" (lowercase) for GitHub records (no
+// source field, or source "github"), "cws:<id>" and "url:<id>" for the others.
+// GitHub names never hold ":", so the kinds never collide.
+export const repoKey = (r) => (r.source === "cws" ? `cws:${r.id}` : r.source === "updateUrl" ? `url:${r.id}` : `${r.owner}/${r.repo}`.toLowerCase());
+export const sourceOf = (r) => r.source || "github";
 
 // Runs fn() while holding the state lock in this browser profile.
 export function withStateLock(fn) {
@@ -85,6 +93,33 @@ export function newRecord(owner, repo) {
     checkedAt: null,
     error: null,
     addedAt: Date.now(),
+  };
+}
+
+// Record of an extension tracked through its own update server, the CWS
+// (source "cws") or the manifest's update_url (source "updateUrl"):
+// { source, id, extensionId (= id), updateUrl (updateUrl only), name (best
+//   known name, from management or the CRX manifest, or null),
+//   installed: { tag: null, digest, version } | null  (confirmed installs),
+//   latest: { version, codebase, size, hash } | null  (last check's newest
+//   build; size and hash null when the server announced none; codebase null
+//   when a self-hosted server answered "noupdate" for the installed version),
+//   unavailable: { malware } | null  (the server offers no build to this browser),
+//   identityChange: null, checkedAt, error, addedAt }
+export function newSourceRecord(source, id, { updateUrl = null, name = null, installed = null, addedAt = Date.now() } = {}) {
+  return {
+    source,
+    id,
+    extensionId: id,
+    ...(source === "updateUrl" ? { updateUrl } : {}),
+    name,
+    installed,
+    latest: null,
+    unavailable: null,
+    identityChange: null,
+    checkedAt: null,
+    error: null,
+    addedAt,
   };
 }
 
@@ -349,17 +384,27 @@ export function migrateStorage() {
 
 // Backup of the configuration (no release caches), every repo signing key,
 // retained ones included, and the file keys ({ "<extension ID>": pkcs8 }).
+// Version 4 adds sources: the CWS and update-URL records
+// [{ source, id, updateUrl (updateUrl only), name, installed, addedAt }].
 export function makeBackup(records, keys, now = new Date(), fileKeys = {}) {
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     exportedAt: now.toISOString(),
-    repos: records.map((r) => ({
+    repos: records.filter((r) => sourceOf(r) === "github").map((r) => ({
       owner: r.owner,
       repo: r.repo,
       template: r.template,
       includePrereleases: r.includePrereleases,
       extensionId: r.extensionId,
+      installed: r.installed,
+      addedAt: r.addedAt,
+    })),
+    sources: records.filter((r) => sourceOf(r) !== "github").map((r) => ({
+      source: r.source,
+      id: r.id,
+      ...(r.source === "updateUrl" ? { updateUrl: r.updateUrl } : {}),
+      name: r.name,
       installed: r.installed,
       addedAt: r.addedAt,
     })),
@@ -381,10 +426,55 @@ async function checkKey(where, b64) {
   return extensionIdFromSpki(spki);
 }
 
-// Validates a backup (format 1, 2 or 3) against the full schema and returns
-// { repos: [records without caches], keys: { "owner/name": pkcs8 },
-//   fileKeys: { "<extension ID>": pkcs8 }, warnings: [] }.
+// installed of a backup record: null/absent or { tag, digest, version }. Throws naming where.
+function checkInstalled(where, inst) {
+  if (inst === null || inst === undefined) return null;
+  const ok = typeof inst === "object" && !Array.isArray(inst)
+    && (inst.tag === null || typeof inst.tag === "string")
+    && (inst.digest === null || (typeof inst.digest === "string" && DIGEST_RE.test(inst.digest)))
+    && typeof inst.version === "string" && inst.version.length <= 64;
+  if (!ok) throw new Error(`${where}: installed is not null or { tag, digest, version }: ${show(inst)}`);
+  return { tag: inst.tag, digest: inst.digest, version: inst.version };
+}
+
+// The CWS and update-URL records of a version 4 backup, as records.
+function parseSources(list, seen) {
+  if (!Array.isArray(list)) throw new Error("import backup: sources is not a list");
+  return list.map((s, i) => {
+    let where = `import backup: sources #${i + 1}`;
+    if (!s || typeof s !== "object" || Array.isArray(s)) throw new Error(`${where}: not an object: ${show(s)}`);
+    if (s.source !== "cws" && s.source !== "updateUrl") throw new Error(`${where}: source is not "cws" or "updateUrl": ${show(s.source)}`);
+    if (typeof s.id !== "string" || !ID_RE.test(s.id)) throw new Error(`${where}: id is not 32 letters a-p: ${show(s.id)}`);
+    const key = repoKey(s);
+    where += ` (${key})`;
+    if (seen.has(key)) throw new Error(`${where}: listed twice`);
+    seen.add(key);
+    let updateUrl = null;
+    if (s.source === "updateUrl") {
+      let u = null;
+      try {
+        u = typeof s.updateUrl === "string" && s.updateUrl.length <= 2048 ? new URL(s.updateUrl) : null;
+      } catch {
+        u = null;
+      }
+      if (!u || u.protocol !== "https:") throw new Error(`${where}: updateUrl is not an https URL: ${show(s.updateUrl)}`);
+      updateUrl = s.updateUrl;
+    }
+    if (s.name !== null && s.name !== undefined && !(typeof s.name === "string" && s.name.length <= 200)) {
+      throw new Error(`${where}: name is not null or a text of at most 200 characters: ${show(s.name)}`);
+    }
+    if (s.addedAt !== undefined && !Number.isFinite(s.addedAt)) throw new Error(`${where}: addedAt is not a number: ${show(s.addedAt)}`);
+    return newSourceRecord(s.source, s.id, {
+      updateUrl, name: s.name ?? null, installed: checkInstalled(where, s.installed), addedAt: s.addedAt ?? Date.now(),
+    });
+  });
+}
+
+// Validates a backup (format 1, 2, 3 or 4) against the full schema and returns
+// { repos: [records without caches, GitHub and (version 4) the other sources],
+//   keys: { "owner/name": pkcs8 }, fileKeys: { "<extension ID>": pkcs8 }, warnings: [] }.
 // Version 3 adds fileKeys; each must derive the ID it is filed under.
+// Version 4 adds sources (makeBackup).
 // Throws "import backup: ..." naming the entry, field and value on the first problem.
 export async function parseBackup(text) {
   let data;
@@ -393,14 +483,14 @@ export async function parseBackup(text) {
   } catch (e) {
     throw new Error(`import backup: not JSON (${e.message})`);
   }
-  if (!data || typeof data !== "object" || data.format !== BACKUP_FORMAT || ![1, 2, 3].includes(data.version)) {
-    throw new Error(`import backup: not an ${BACKUP_FORMAT} version 1, 2 or 3 file`);
+  if (!data || typeof data !== "object" || data.format !== BACKUP_FORMAT || ![1, 2, 3, 4].includes(data.version)) {
+    throw new Error(`import backup: not an ${BACKUP_FORMAT} version 1, 2, 3 or 4 file`);
   }
   if (!Array.isArray(data.repos)) throw new Error("import backup: repos is not a list");
   const keys = {};
   const fileKeys = {};
   const warnings = [];
-  if (data.version === 3) {
+  if (data.version >= 3) {
     if (!data.fileKeys || typeof data.fileKeys !== "object" || Array.isArray(data.fileKeys)) throw new Error("import backup: fileKeys is not an object");
     for (const [id, b64] of Object.entries(data.fileKeys)) {
       const derived = await checkKey(`import backup: fileKeys["${id}"]`, b64);
@@ -437,14 +527,7 @@ export async function parseBackup(text) {
     if (r.extensionId !== null && !(typeof r.extensionId === "string" && ID_RE.test(r.extensionId))) {
       throw new Error(`${where}: extensionId is not null or 32 letters a-p: ${show(r.extensionId)}`);
     }
-    const inst = r.installed;
-    if (inst !== null && inst !== undefined) {
-      const ok = typeof inst === "object" && !Array.isArray(inst)
-        && (inst.tag === null || typeof inst.tag === "string")
-        && (inst.digest === null || (typeof inst.digest === "string" && DIGEST_RE.test(inst.digest)))
-        && typeof inst.version === "string" && inst.version.length <= 64;
-      if (!ok) throw new Error(`${where}: installed is not null or { tag, digest, version }: ${show(inst)}`);
-    }
+    const installed = checkInstalled(where, r.installed);
     if (r.addedAt !== undefined && !Number.isFinite(r.addedAt)) throw new Error(`${where}: addedAt is not a number: ${show(r.addedAt)}`);
     let template;
     if (data.version >= 2) {
@@ -471,10 +554,11 @@ export async function parseBackup(text) {
       template,
       includePrereleases: r.includePrereleases,
       extensionId: r.extensionId,
-      installed: inst ? { tag: inst.tag, digest: inst.digest, version: inst.version } : null,
+      installed,
       addedAt: r.addedAt ?? Date.now(),
     });
   }
+  if (data.version >= 4) repos.push(...parseSources(data.sources, seen));
   // A key need not derive the repo's extension ID: a retained zip key stays
   // after an explicit switch to the author's CRX. A pairing that does not fit
   // the installed extension ends in an identity change at the next link.

@@ -16,15 +16,19 @@ import {
 import { normalizeExtensionZip, parseZip, readManifest, verifyZip } from "./zip.js";
 import { MAX_RELEASE_PAGES, downloadAsset, downloadAssetHead, fetchReleaseFeed, fetchReleases, sha256Hex } from "./github.js";
 import {
-  deriveTemplate, isPackageAsset, latestFor, matchAssets, parseRepo, selectRelease, updateState, validateTemplate,
+  compareVersions, deriveTemplate, isPackageAsset, latestFor, matchAssets, parseRepo, selectRelease, updateState, validateTemplate,
 } from "./releases.js";
 import {
   INSTALL_PREFIX, findRepo, getFileKey, getRepo, getSettings, getSigningKey, listFileKeys, listInstalls,
   listKeyDeletions, listRepos, listSigningKeys, makeBackup, markKeyForDeletion, migrateStorage, newRecord,
-  parseBackup, patchRepo, putFileKeyIfAbsent, putInstall, putRepo, putSigningKeyIfAbsent, removeFileKey,
-  removeInstall, removeKeyDeletion, removeRepoRecord, removeSigningKey, repoKey, setSettings, updateRepo, withOpLock,
+  newSourceRecord, parseBackup, patchRepo, putFileKeyIfAbsent, putInstall, putRepo, putSigningKeyIfAbsent, removeFileKey,
+  removeInstall, removeKeyDeletion, removeRepoRecord, removeSigningKey, repoKey, setSettings, sourceOf, updateRepo, withOpLock,
   withStateLock,
 } from "./store.js";
+import {
+  CWS_ORIGINS, TITANIUM_HELPER_ID, cwsCheckBatches, isCwsUpdateUrl, manifestName, originOf, parseSourceInput,
+  parseUpdateManifest, readUpdatecheck, updateUrlCheckUrl,
+} from "./sources.js";
 import { installCrx } from "./install.js";
 
 // Migrates stored state once per context before the first operation.
@@ -73,20 +77,70 @@ async function idOfKey(pkcs8) {
   return extensionIdFromSpki((await importSigningKey(base64Decode(pkcs8))).spki);
 }
 
-// [{ key, record, latest, ext, state, hasKey, pendingInstall }] for the UI and the badge.
-// state: updateState's states, or "identity-change" while record.identityChange
-// waits for confirmIdentityChange. pendingInstall: { version, tag, promptAt } of
+// The origins of origins that the extension holds no host permission for.
+async function missingOriginsOf(origins) {
+  const missing = [];
+  for (const o of new Set(origins)) if (!(await chrome.permissions.contains({ origins: [o] }))) missing.push(o);
+  return missing;
+}
+
+// The host permissions a record needs: the CWS hosts, or a self-hosted
+// record's update URL host and the host of the build it announced last.
+function neededOrigins(record) {
+  if (record.source === "cws") return CWS_ORIGINS;
+  if (record.source !== "updateUrl") return [];
+  return [originOf(record.updateUrl), ...(record.latest && record.latest.codebase ? [originOf(record.latest.codebase)] : [])];
+}
+
+// state of a CWS or update-URL record: "not-offered" (its server offers no
+// build to this browser), "unknown" (no successful check yet, or versions
+// that do not compare), "not-installed", "update" or "current".
+function sourceState(record, ext) {
+  if (record.unavailable) return "not-offered";
+  if (!record.latest) return "unknown";
+  if (!ext) return "not-installed";
+  const order = orderOrNull(record.latest.version, ext.version);
+  if (order === null) return record.latest.version === ext.version ? "current" : "unknown";
+  return order > 0 ? "update" : "current";
+}
+
+function orderOrNull(a, b) {
+  try {
+    return compareVersions(a, b);
+  } catch {
+    return null; // a version outside the grammar, e.g. "2024-01"
+  }
+}
+
+const SOURCE_LABELS = { github: "GitHub", cws: "Chrome Web Store" };
+
+// [{ key, record, latest, ext, state, hasKey, pendingInstall, source, title,
+//   sourceLabel, sourceUrl, needsOrigins }] for the UI and the badge.
+// state: updateState's states for GitHub records, sourceState's for the
+// others, or "identity-change" while record.identityChange waits for
+// confirmIdentityChange. pendingInstall: { version, tag, promptAt } of
 // a CRX handed to the browser whose install was not confirmed yet, or null;
 // promptAt is when its "Add extension?" prompt appeared (its download
 // completed), null while it is still downloading (see isPromptWaiting).
+// source: "github" | "cws" | "updateUrl"; latest: latestFor(record) for
+// GitHub, record.latest ({ version, codebase, size, hash } or null) for the
+// others; title: the best known name; sourceLabel: "GitHub", "Chrome Web
+// Store" or the update URL's host; sourceUrl: the repo page, the store page
+// or the update URL; needsOrigins: the host permissions (origin patterns) the
+// record needs and the extension does not hold yet, [] when all are granted.
+// The array also carries installBlocked: environment()'s installBlocked.
 export async function trackedView() {
   await ready();
-  const [records, exts, keys, installs] = await Promise.all([listRepos(), installedExtensions(), listSigningKeys(), listInstalls()]);
-  return records.map((record) => {
+  const [records, exts, keys, installs, { installBlocked = null }] = await Promise.all([
+    listRepos(), installedExtensions(), listSigningKeys(), listInstalls(), chrome.storage.local.get("installBlocked"),
+  ]);
+  const views = await Promise.all(records.map(async (record) => {
     const key = repoKey(record);
-    const latest = latestFor(record);
+    const source = sourceOf(record);
+    const github = source === "github";
+    const latest = github ? latestFor(record) : record.latest;
     const ext = (record.extensionId && exts.get(record.extensionId)) || null;
-    const state = record.identityChange ? "identity-change" : updateState({ latest, installed: record.installed }, ext);
+    const state = record.identityChange ? "identity-change" : github ? updateState({ latest, installed: record.installed }, ext) : sourceState(record, ext);
     const pending = installs
       .filter((i) => i.repoKey === key && i.extensionId === record.extensionId && !i.confirmedAt && i.version)
       .sort(promptOrder)[0];
@@ -96,8 +150,128 @@ export async function trackedView() {
       pendingInstall: pending
         ? { version: pending.version, tag: pending.installed && pending.installed.tag, promptAt: pending.downloadDone ? promptTime(pending) : null }
         : null,
+      source,
+      title: github ? (ext ? ext.name : record.repo) : (ext && ext.name) || record.name || record.id,
+      sourceLabel: SOURCE_LABELS[source] || new URL(record.updateUrl).host,
+      sourceUrl: github ? `https://github.com/${record.owner}/${record.repo}`
+        : source === "cws" ? `https://chromewebstore.google.com/detail/${record.id}` : record.updateUrl,
+      needsOrigins: await missingOriginsOf(neededOrigins(record)),
     };
-  });
+  }));
+  views.installBlocked = installBlocked;
+  return views;
+}
+
+// ---- Browser environment ----
+
+// The browser's full version ("158.0.8127.100"): the Chromium (or Google
+// Chrome) brand of navigator.userAgentData's fullVersionList, else the user
+// agent's Chrome/<version> (which user-agent reduction may shorten to x.0.0.0).
+export async function browserVersion() {
+  const uad = navigator.userAgentData;
+  if (uad && typeof uad.getHighEntropyValues === "function") {
+    const { fullVersionList = [] } = await uad.getHighEntropyValues(["fullVersionList"]);
+    const brand = fullVersionList.find((b) => b.brand === "Chromium") || fullVersionList.find((b) => b.brand === "Google Chrome");
+    if (brand && /^\d+(\.\d+){3}$/.test(brand.version)) return brand.version;
+  }
+  const ua = String(navigator.userAgent || "");
+  const m = /Chrome\/(\d+\.\d+\.\d+\.\d+)/.exec(ua);
+  if (!m) throw new Error(`read browser version: no Chrome/<version> in the user agent ${JSON.stringify(ua)}`);
+  return m[1];
+}
+
+async function platformOf() {
+  if (/Android/.test(String(navigator.userAgent || ""))) return "android";
+  return (await chrome.runtime.getPlatformInfo()).os === "android" ? "android" : "desktop";
+}
+
+// True on desktop browsers other than Titanium: an off-store CRX installs
+// there only with chrome://flags/#extension-mime-request-handling set to
+// "Always prompt for install" (ungoogled-chromium's flag).
+async function installNeedsFlag() {
+  return (await platformOf()) === "desktop" && !(await installedExtensions()).has(TITANIUM_HELPER_ID);
+}
+
+// { platform: "android" | "desktop", browserVersion, installNeedsFlag,
+//   installBlocked: { at, hint: "flag" } | null }. installBlocked: a desktop
+// hand-off whose download completed within INSTALL_REFUSED_MS of its start
+// (no "Add extension?" prompt held it) and whose copy the browser's installer
+// deleted without an install: the browser refused the off-store install, so
+// the flag is not set. Cleared by the next confirmed install or by
+// dismissInstallBlocked.
+export async function environment() {
+  await ready();
+  const [platform, version, needsFlag, { installBlocked = null }] = await Promise.all([
+    platformOf(), browserVersion(), installNeedsFlag(), chrome.storage.local.get("installBlocked"),
+  ]);
+  return { platform, browserVersion: version, installNeedsFlag: needsFlag, installBlocked };
+}
+
+// Forgets view.installBlocked (the UI's banner was dismissed).
+export const dismissInstallBlocked = operation(() => withStateLock(() => chrome.storage.local.remove("installBlocked")));
+
+// ---- Installed extensions ----
+
+const BROWSER_INSTALL_TYPES = new Set(["admin", "sideload", "other"]);
+
+// kind of an installed extension: "tracked" (trackedKey is the record that
+// follows it), "browser" (installed by policy, another program or the
+// browser, or Titanium's helper), "cws" (updates from the CWS), "selfUpdating"
+// (another update URL) or "unmanaged" (no update URL).
+function installedKind(ext, trackedKey) {
+  if (trackedKey) return "tracked";
+  if (BROWSER_INSTALL_TYPES.has(ext.installType) || ext.id === TITANIUM_HELPER_ID) return "browser";
+  if (ext.updateUrl && isCwsUpdateUrl(ext.updateUrl)) return "cws";
+  return ext.updateUrl ? "selfUpdating" : "unmanaged";
+}
+
+const isHttpsUrl = (url) => {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+// How an untracked extension of kind can be tracked: "cws", "updateUrl"
+// (an https update URL), "github" (linked to a repo) or null.
+function canTrackOf(ext, kind) {
+  if (kind === "cws") return "cws";
+  if (kind === "selfUpdating") return isHttpsUrl(ext.updateUrl) ? "updateUrl" : null;
+  return kind === "unmanaged" ? "github" : null;
+}
+
+// The largest icon chrome.management lists, or null.
+const bestIcon = (ext) => [...(ext.icons || [])].sort((a, b) => b.size - a.size)[0]?.url || null;
+
+// Every installed extension: [{ id, name, version, enabled, icon, installType,
+// updateUrl, kind, trackedKey, canTrack, needsOrigins, updateHost }], sorted
+// by name. kind: installedKind's; trackedKey: the record that follows it, or
+// null; canTrack: canTrackOf's; needsOrigins: the host permissions that
+// tracking it needs and the extension does not hold yet (request them before
+// trackInstalled); updateHost: the update URL's host, or null.
+export async function installedOverview() {
+  await ready();
+  const [records, all] = await Promise.all([listRepos(), chrome.management.getAll()]);
+  const trackedBy = new Map(records.filter((r) => r.extensionId).map((r) => [r.extensionId, repoKey(r)]));
+  const rows = await Promise.all(all.map(async (ext) => {
+    const trackedKey = trackedBy.get(ext.id) || null;
+    const kind = installedKind(ext, trackedKey);
+    const canTrack = canTrackOf(ext, kind);
+    const needed = canTrack === "cws" ? CWS_ORIGINS : canTrack === "updateUrl" ? [originOf(ext.updateUrl)] : [];
+    let updateHost = null;
+    try {
+      updateHost = ext.updateUrl ? new URL(ext.updateUrl).host : null;
+    } catch {
+      updateHost = null; // not a URL: shown without a host
+    }
+    return {
+      id: ext.id, name: ext.name, version: ext.version, enabled: ext.enabled, icon: bestIcon(ext),
+      installType: ext.installType || null, updateUrl: ext.updateUrl || null,
+      kind, trackedKey, canTrack, needsOrigins: await missingOriginsOf(needed), updateHost,
+    };
+  }));
+  return rows.sort((a, b) => String(a.name).localeCompare(String(b.name)) || a.id.localeCompare(b.id));
 }
 
 // True while a pending install ({ promptAt }, as in trackedView) may still be
@@ -185,6 +359,11 @@ export const checkRepo = operation(checkRepoNow);
 
 async function checkRepoNow(key) {
   const record = await getRepo(key);
+  if (sourceOf(record) !== "github") {
+    const error = (await checkSourcesNow([record])).get(key);
+    if (error) throw new Error(error);
+    return getRepo(key);
+  }
   const { githubToken } = await getSettings();
   const checkedAt = Date.now();
   const feed = await readFeed(record);
@@ -217,20 +396,138 @@ export const checkAll = operation(checkAllNow);
 
 async function checkAllNow() {
   const errors = [];
-  for (const r of await listRepos()) {
+  const records = await listRepos();
+  for (const r of records.filter((x) => sourceOf(x) === "github")) {
     try {
       await checkRepoNow(repoKey(r));
     } catch (e) {
       errors.push(e.message);
     }
   }
+  for (const error of (await checkSourcesNow(records.filter((x) => sourceOf(x) !== "github"))).values()) {
+    if (error) errors.push(error);
+  }
   const updates = await refreshBadge();
   await chrome.storage.local.set({ lastCheck: { at: Date.now(), updates, errors } });
   return { updates, errors };
 }
 
+// ---- Checks of CWS and update-URL records ----
+
+const CHECK_FETCH = { credentials: "omit", cache: "no-store" };
+
+// GETs url; throws a message naming the host on a network error or HTTP error.
+async function fetchFrom(url, init = {}) {
+  let res;
+  try {
+    res = await fetch(url, { credentials: "omit", ...init });
+  } catch (e) {
+    throw new Error(`cannot reach ${new URL(url).host} (${e.message})`);
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} from ${new URL(url).host}`);
+  return res;
+}
+
+// Stores a successful check: the newest build, or, after "noupdate", that
+// none is offered. installedVersion: the version the request named (v=), for
+// which "noupdate" means "up to date"; null when it named 0.0.0.0.
+function applyUpdatecheck(key, result, checkedAt, installedVersion) {
+  if (result.kind === "update") return patchRepo(key, { latest: result.latest, unavailable: null, error: null, checkedAt });
+  if (installedVersion) {
+    return patchRepo(key, { latest: { version: installedVersion, codebase: null, size: null, hash: null }, unavailable: null, error: null, checkedAt });
+  }
+  return patchRepo(key, { latest: null, unavailable: { malware: result.malware }, error: null, checkedAt });
+}
+
+// Checks CWS and update-URL records: all CWS records in batched requests
+// (cwsCheckBatches), each update-URL record with its own request. One
+// failure does not stop the others; each record keeps its error. Returns
+// Map(key -> error message or null).
+async function checkSourcesNow(records) {
+  const results = new Map();
+  const checkedAt = Date.now();
+  const fail = async (key, message) => {
+    const error = `check ${key}: ${message}`;
+    results.set(key, error);
+    await patchRepo(key, { error, checkedAt });
+  };
+  const cws = records.filter((r) => r.source === "cws");
+  if (cws.length) {
+    const missing = await missingOriginsOf([CWS_ORIGINS[0]]);
+    if (missing.length) {
+      for (const r of cws) await fail(repoKey(r), `no host permission for ${missing.join(", ")}`);
+    } else {
+      const version = await browserVersion();
+      for (const batch of cwsCheckBatches(cws.map((r) => r.id), version)) {
+        let apps = null;
+        let batchError = null;
+        try {
+          apps = parseUpdateManifest(await (await fetchFrom(batch.url, CHECK_FETCH)).text()).apps;
+          const extra = apps.find((a) => !batch.ids.includes(a.appid));
+          if (extra) throw new Error(`the update server's answer lists extension ${JSON.stringify(extra.appid)}, which was not asked for`);
+        } catch (e) {
+          batchError = e.message;
+        }
+        for (const id of batch.ids) {
+          const key = repoKey({ source: "cws", id });
+          try {
+            if (batchError) throw new Error(batchError);
+            const app = apps.find((a) => a.appid === id);
+            if (!app) throw new Error("the update server's answer has no entry for this extension");
+            await applyUpdatecheck(key, readUpdatecheck(app, { needHashAndSize: true }), checkedAt, null);
+            results.set(key, null);
+          } catch (e) {
+            await fail(key, e.message);
+          }
+        }
+      }
+    }
+  }
+  for (const record of records.filter((r) => r.source === "updateUrl")) {
+    const key = repoKey(record);
+    try {
+      const missing = await missingOriginsOf([originOf(record.updateUrl)]);
+      if (missing.length) throw new Error(`no host permission for ${missing.join(", ")}`);
+      const ext = (await installedExtensions()).get(record.id);
+      const version = ext ? ext.version : null;
+      const url = updateUrlCheckUrl(record.updateUrl, record.id, version || "0.0.0.0");
+      const { apps } = parseUpdateManifest(await (await fetchFrom(url, CHECK_FETCH)).text());
+      const app = apps.find((a) => a.appid === record.id);
+      if (!app) throw new Error(`${new URL(record.updateUrl).host} lists no update for this extension`);
+      await applyUpdatecheck(key, readUpdatecheck(app), checkedAt, version);
+      results.set(key, null);
+    } catch (e) {
+      await fail(key, e.message);
+    }
+  }
+  return results;
+}
+
+// Adds a record and runs its first check (removed again when that fails).
+// The record must not follow an extension another record follows.
+async function addSourceRecordNow(record, what) {
+  const key = repoKey(record);
+  await withStateLock(async () => {
+    for (const r of await listRepos()) {
+      if (repoKey(r) === key) throw new Error(`${what}: ${key} is already tracked`);
+      if (record.extensionId && r.extensionId === record.extensionId) throw new Error(`${what}: extension ${record.extensionId} is already tracked as ${repoKey(r)}`);
+    }
+    await putRepo(record);
+  });
+  await checkNewRepo(key);
+  await refreshBadge();
+  return key;
+}
+
+// input: owner/repo, a GitHub URL, a CWS link or an extension ID (parseSourceInput).
+// A CWS item needs the CWS_ORIGINS host permissions (the first check fails without them).
 export const addRepo = operation(async (input) => {
-  const { owner, repo } = parseRepo(input);
+  const parsed = parseSourceInput(input);
+  if (parsed.source === "cws") {
+    const ext = (await installedExtensions()).get(parsed.id);
+    return addSourceRecordNow(newSourceRecord("cws", parsed.id, { name: ext ? ext.name : null }), "add repo");
+  }
+  const { owner, repo } = parsed;
   const key = repoKey({ owner, repo });
   await withStateLock(async () => {
     if (await findRepo(key)) throw new Error(`add repo: ${key} is already tracked`);
@@ -297,7 +594,13 @@ export const confirmIdentityChange = operation(async (key) => {
 // template: asset file name template (releases.js), e.g. "ext-{version}.zip".
 export const setTemplate = operation(setTemplateNow);
 
+// Throws unless key is a GitHub record (templates and pre-releases apply to releases only).
+async function requireGithub(key, what) {
+  if (sourceOf(await getRepo(key)) !== "github") throw new Error(`${what}: ${key} is not a GitHub repo`);
+}
+
 async function setTemplateNow(key, template) {
+  await requireGithub(key, `set template of ${key}`);
   validateTemplate(template);
   // A new template replaces whatever made the old one fail (e.g. a migration error).
   await patchRepo(key, { template, error: null });
@@ -318,6 +621,7 @@ export const chooseAsset = operation((key, assetName, tag) => setTemplateNow(key
 
 export const setPrereleases = operation(async (key, includePrereleases) => {
   if (typeof includePrereleases !== "boolean") throw new Error(`set pre-releases of ${key}: not true/false: ${includePrereleases}`);
+  await requireGithub(key, `set pre-releases of ${key}`);
   await patchRepo(key, { includePrereleases });
   return relink(key);
 });
@@ -325,8 +629,9 @@ export const setPrereleases = operation(async (key, includePrereleases) => {
 // ---- Hand-off to the browser and download cleanup ----
 // Each CRX handed to the browser gets an "install:<token>" entry:
 //   { token, repoKey|null, extensionId, version|null, installed: {tag, digest, version},
-//     crxHash, signedWith|null, supersededBy|null, downloadId|null, downloadDone,
-//     promptAt|null, at, confirmedAt|null, fileGone, removeError|null }
+//     crxHash, signedWith|null, supersededBy|null, downloadId|null, startedAt|null,
+//     downloadDone, promptAt|null, at, confirmedAt|null, fileGone, removeError|null }
+// startedAt: when download() returned the download ID.
 // crxHash (sha256 hex of the CRX) names the build the entry stands for.
 // downloadDone: the hand-off download completed, so the browser shows its
 // "Add extension?" prompt; promptAt: when that was seen (null before; entries
@@ -367,6 +672,10 @@ export const SWEEP_ALARM = "sweep-downloads";
 // hand-off gets its ID from download() within moments; this only bounds
 // entries whose page went away before that.
 export const NO_DOWNLOAD_ID_MS = 10 * 60 * 1000;
+// A desktop hand-off whose download completes this soon after it started was
+// not held by an "Add extension?" prompt (Chromium completes the download only
+// once the prompt is answered); measured: ~15 ms when the installer refused.
+export const INSTALL_REFUSED_MS = 3000;
 
 const getInstall = async (token) => (await chrome.storage.local.get(INSTALL_PREFIX + token))[INSTALL_PREFIX + token] || null;
 
@@ -500,7 +809,7 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
   }
   const onStarted = (downloadId) => withStateLock(async () => {
     const e = await getInstall(token);
-    if (e) await putInstall({ ...e, downloadId });
+    if (e) await putInstall({ ...e, downloadId, startedAt: Date.now() });
   });
   // Armed before the download: if this page closes mid-download, only a sweep
   // resolves the entry (sweepDownloads re-arms itself while entries remain).
@@ -539,9 +848,28 @@ async function handOff(crx, { repoKey: key, extensionId, manifest, installed, cl
   });
   // Not awaited: the install result does not wait for the cleanup retry.
   if (end && end.confirmedAt && !end.fileGone) retryDeletes([token]).catch((e) => console.error("[Extainium] delete CRX copy:", e));
+  if (end && !end.confirmedAt && end.startedAt && end.promptAt - end.startedAt < INSTALL_REFUSED_MS && (await installNeedsFlag())) {
+    watchRefusal(token).catch((e) => console.error("[Extainium] check refused install:", e));
+  }
   await armSweep();
   if (failure) throw failure;
   return { token, promptAt: end ? end.promptAt : null, confirmed: !!(end && end.confirmedAt) };
+}
+
+// After a desktop hand-off completed without a prompt: once the browser's
+// file check (started by a search, as in retryDeletes) reports the copy gone
+// while the install is still unconfirmed, the installer refused it, so
+// installBlocked is recorded (see environment).
+async function watchRefusal(token) {
+  await sleep(cleanupTiming.retryMs);
+  await chrome.downloads.search({});
+  await sleep(cleanupTiming.settleMs);
+  await withStateLock(async () => {
+    const e = await getInstall(token);
+    if (!e || e.confirmedAt || e.downloadId === null) return;
+    const [item] = await chrome.downloads.search({ id: e.downloadId });
+    if (item && item.exists === false) await chrome.storage.local.set({ installBlocked: { at: e.promptAt, hint: "flag" } });
+  });
 }
 
 // management.onInstalled: confirms the pending install of info.id at
@@ -568,6 +896,7 @@ export async function handleExtensionInstalled(info) {
       if (e !== newest && flying.includes(e)) continue; // its prompt is yet to come
       if (e === newest) {
         e = { ...e, confirmedAt: now, signedWith: null };
+        await chrome.storage.local.remove("installBlocked"); // installs work now
         const record = e.repoKey && (await findRepo(e.repoKey));
         if (record && record.extensionId === info.id) await putRepo({ ...record, installed: e.installed });
       } else {
@@ -632,14 +961,15 @@ function armSweep() {
 }
 
 // Turns a .crx or .zip into an installable CRX after checking the archive.
-// A CRX must pass signature verification (verifyCrx). Zips are signed with
-// keyPkcs8. name: the file's name for errors. Returns { crx, extensionId, manifest }.
-async function prepare(bytes, keyPkcs8, name) {
+// A CRX must pass signature verification (verifyCrx, with verifyOptions).
+// Zips are signed with keyPkcs8. name: the file's name for errors.
+// Returns { crx, extensionId, manifest, entries (the CRX's zip entries) }.
+async function prepare(bytes, keyPkcs8, name, verifyOptions = {}) {
   if (isCrx(bytes)) {
-    const extensionId = await verifyCrx(bytes, name);
+    const extensionId = await verifyCrx(bytes, name, verifyOptions);
     const entries = parseZip(zipFromCrx(bytes));
     await verifyZip(entries);
-    return { crx: bytes, extensionId, manifest: await readManifest(entries) };
+    return { crx: bytes, extensionId, manifest: await readManifest(entries), entries };
   }
   const pkcs8 = base64Decode(keyPkcs8);
   const { bytes: zip, manifest } = await normalizeExtensionZip(bytes);
@@ -671,8 +1001,14 @@ async function claimLocked({ key, change }, extensionId, exts) {
 // Page only. onProgress(text) reports the current step. The install counts
 // once the browser confirms it (handleExtensionInstalled); until then the view
 // shows it as pendingInstall. Returns { extensionId, version, name }.
+// A CWS or update-URL record (no tag) installs the newest build its server
+// announces (installSourceNow).
 export const installRelease = operation(async (key, tag, onProgress = () => {}) => {
   const record = await getRepo(key);
+  if (sourceOf(record) !== "github") {
+    if (tag) throw new Error(`install ${key}: not a GitHub repo, so there is no release ${tag}`);
+    return installSourceNow(key, onProgress);
+  }
   if (record.identityChange) throw identityError(key, record);
   let release;
   if (tag) {
@@ -701,6 +1037,108 @@ export const installRelease = operation(async (key, tag, onProgress = () => {}) 
   });
   return { extensionId, version: manifest.version, name: manifest.name };
 });
+
+// Installs the newest build of a CWS or update-URL record: checks again
+// (CRX URLs are version-specific), downloads the announced codebase, checks
+// its size and SHA-256 against the announcement, verifies the CRX (for the
+// CWS also Google's publisher proof), its ID (the record's) and its version
+// (the announced one), then hands it to the browser. Returns { extensionId, version, name }.
+async function installSourceNow(key, onProgress) {
+  const what = `install ${key}`;
+  const error = (await checkSourcesNow([await getRepo(key)])).get(key);
+  if (error) throw new Error(`${what}: ${error}`);
+  const record = await getRepo(key);
+  const cws = record.source === "cws";
+  if (record.unavailable) {
+    throw new Error(`${what}: ${cws ? "the Chrome Web Store" : new URL(record.updateUrl).host} offers no build of this extension to this browser`);
+  }
+  const latest = record.latest;
+  if (!latest.codebase) throw new Error(`${what}: the update server offers nothing newer than the installed version ${latest.version}`);
+  const missing = await missingOriginsOf([originOf(latest.codebase)]);
+  if (missing.length) throw new Error(`${what}: no host permission for ${missing.join(", ")}`);
+  onProgress(`Downloading ${record.name || record.id} ${latest.version}…`);
+  let bytes;
+  try {
+    bytes = new Uint8Array(await (await fetchFrom(latest.codebase)).arrayBuffer());
+  } catch (e) {
+    throw new Error(`download ${key} ${latest.version}: ${e.message}`);
+  }
+  if (latest.size !== null && bytes.length !== latest.size) {
+    throw new Error(`${what}: downloaded ${bytes.length} bytes, the update server announced ${latest.size}`);
+  }
+  const digest = await sha256Hex(bytes);
+  if (latest.hash !== null && digest !== latest.hash) {
+    throw new Error(`${what}: the download's sha256 ${digest} does not match the announced ${latest.hash}`);
+  }
+  if (!isCrx(bytes)) throw new Error(`${what}: the download from ${new URL(latest.codebase).host} is not a CRX file`);
+  onProgress("Checking CRX…");
+  const { crx, extensionId, manifest, entries } = await prepare(bytes, null, `${key} ${latest.version}`, { publisherProof: cws });
+  if (extensionId !== record.id) throw new Error(`${what}: the CRX installs as extension ${extensionId}, not as ${record.id}`);
+  if (manifest.version !== latest.version) {
+    throw new Error(`${what}: the CRX holds version ${JSON.stringify(manifest.version)}, the update server announced ${latest.version}`);
+  }
+  const name = (await manifestName(manifest, entries)) || record.name || record.id;
+  await patchRepo(key, { name });
+  onProgress("Handing the CRX to the browser…");
+  await handOff(crx, {
+    repoKey: key, extensionId, manifest: { ...manifest, name },
+    installed: { tag: null, digest: `sha256:${digest}`, version: manifest.version },
+  });
+  return { extensionId, version: manifest.version, name };
+}
+
+// Starts tracking an installed extension through its own update server:
+// a "cws" record when its update URL is the CWS, an "updateUrl" record for
+// another https update URL (Extainium itself included). Assumes the UI was
+// granted installedOverview's needsOrigins (else the first check fails and
+// nothing is added). Returns the record's key.
+export const trackInstalled = operation(async (id) => {
+  const ext = (await installedExtensions()).get(id);
+  if (!ext) throw new Error(`track ${id}: no installed extension has this ID`);
+  const kind = installedKind(ext, null);
+  const canTrack = canTrackOf(ext, kind);
+  if (canTrack === "cws") return addSourceRecordNow(newSourceRecord("cws", id, { name: ext.name }), `track ${id}`);
+  if (canTrack === "updateUrl") {
+    return addSourceRecordNow(newSourceRecord("updateUrl", id, { updateUrl: ext.updateUrl, name: ext.name }), `track ${id}`);
+  }
+  const why = kind === "browser" ? "the browser provides it"
+    : kind === "unmanaged" ? "it has no update URL; link it to a GitHub repo instead"
+      : `its update URL is not https: ${JSON.stringify(ext.updateUrl)}`;
+  throw new Error(`track ${id}: ${ext.name} cannot be tracked through its own update server: ${why}`);
+});
+
+// Starts tracking GitHub repo text (owner/repo or a GitHub URL) for an
+// installed extension without an update URL ("unmanaged"), linked to its ID.
+// Identity rules as for any GitHub record: an asset that installs as another
+// ID leads to an identity change once an asset is chosen. Returns the key.
+export const linkInstalledToGithub = operation(async (id, text) => {
+  const parsed = parseSourceInput(text);
+  if (parsed.source !== "github") throw new Error(`link ${id}: not a GitHub repository: "${String(text).trim()}"`);
+  const { owner, repo } = parsed;
+  const key = repoKey({ owner, repo });
+  const what = `link ${id} to ${key}`;
+  const ext = (await installedExtensions()).get(id);
+  if (!ext) throw new Error(`${what}: no installed extension has this ID`);
+  const kind = installedKind(ext, null);
+  if (kind !== "unmanaged") {
+    throw new Error(`${what}: ${ext.name} ${kind === "browser" ? "is provided by the browser" : `updates from its own update URL ${ext.updateUrl}; track it instead`}`);
+  }
+  return addSourceRecordNow({ ...newRecord(owner, repo), extensionId: id }, what);
+});
+
+// Runs when this extension starts (runtime.onInstalled, onStartup): an
+// install of Extainium itself that Extainium handed to the browser is
+// confirmed by the new instance, as the old one was replaced before
+// management.onInstalled could reach it. Confirms the pending entry for the
+// running version (handleExtensionInstalled). Returns true when one waited.
+export async function confirmOwnInstall() {
+  await ready();
+  const id = chrome.runtime.id;
+  const { version } = chrome.runtime.getManifest();
+  const waiting = (await listInstalls()).some((e) => e.extensionId === id && !e.confirmedAt && e.installed && e.installed.version === version);
+  if (waiting) await handleExtensionInstalled({ id, version });
+  return waiting;
+}
 
 // signWith value that picks the file key of an extension: FILE_KEY_CHOICE + ID.
 export const FILE_KEY_CHOICE = "file:";
@@ -939,8 +1377,12 @@ export const importBackup = operation(async (text) => {
     for (const [id, b64] of Object.entries(fileKeys)) if (!repoKeys.has(b64)) await putFileKeyIfAbsent(id, b64);
     for (const rec of repos) {
       const k = repoKey(rec);
-      const conflict = conflicts.find((c) => c.key === k);
       const current = await findRepo(k);
+      if (sourceOf(rec) !== "github") {
+        if (!current) await putRepo(rec); // a tracked one keeps its state
+        continue;
+      }
+      const conflict = conflicts.find((c) => c.key === k);
       const base = current || { ...rec, extensionId: null, installed: null };
       await putRepo({
         ...base,
