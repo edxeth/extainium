@@ -9,10 +9,11 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
   const env = {
     store: {},
     extensions: extensions.map(clone),
-    files: new Map(), // downloadId -> { filename, bytes, state, exists }
+    files: new Map(), // downloadId -> { filename, bytes, state: "in_progress"|"complete"|"interrupted", exists }
     handedOff: [], // CRX bytes passed to chrome.downloads.download, in order
     removed: [],
     erased: [],
+    cancelled: [],
     uninstalled: [],
     badge: "",
     hooks,
@@ -83,11 +84,14 @@ export function fakeChrome({ extensions = [], hooks = {} } = {}) {
         if (env.removeFileError) throw env.removeFileError;
         const f = env.files.get(id);
         if (!f) throw new Error("Invalid downloadId");
+        if (f.state !== "complete") throw new Error("Download must be complete");
         if (!f.exists) throw new Error("Download file already deleted");
         f.exists = false;
         env.removed.push(id);
       },
+      // Chromium's erase cancels an in-progress download (env.cancelled records it).
       erase: async ({ id }) => {
+        if (env.files.get(id)?.state === "in_progress") env.cancelled.push(id);
         env.files.delete(id);
         env.erased.push(id);
         return [id];

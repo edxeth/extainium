@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkRepo, importBackup, trackedView } from "../src/lib/manager.js";
+import { checkRepo, importBackup, setPrereleases, setTemplate, trackedView } from "../src/lib/manager.js";
 import { fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 
 const v1Record = (extra = {}) => ({
@@ -51,4 +51,26 @@ test("a recheck sends each page's ETag and keeps the cached releases on 304", as
   await checkRepo("o/r");
   assert.equal(apiRequests(gh).length, 1);
   assert.equal((await trackedView())[0].latest.tag, "v2");
+});
+
+// F11: turning pre-releases off after a check that stopped at page 1 (it had a
+// pre-release) fetches page 2 for the stable release, as a check would.
+test("turning pre-releases off fetches the pages the earlier check did not read", async () => {
+  fakeChrome();
+  fakeGithub([...Array.from({ length: 30 }, (_, i) => pre(i)), stable]);
+  await importBackup(v1Backup([v1Record({ includePrereleases: true })]));
+  await setPrereleases("o/r", false);
+  const [view] = await trackedView();
+  assert.equal(view.latest && view.latest.tag, "v1");
+});
+
+// F11: a template typed for an asset that only an older page holds.
+test("a new template that the cached pages do not match fetches further pages", async () => {
+  fakeChrome();
+  const old = { tag: "v0", publishedAt: "2026-09-01T00:00:00Z", assets: [{ name: "legacy.zip", bytes: new Uint8Array(1) }] };
+  fakeGithub([...Array.from({ length: 30 }, (_, i) => pre(i)), stable, old]);
+  await importBackup(v1Backup([v1Record({ includePrereleases: true })]));
+  await setTemplate("o/r", "legacy.zip");
+  const [view] = await trackedView();
+  assert.equal(view.latest && view.latest.tag, "v0");
 });

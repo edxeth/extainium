@@ -51,7 +51,13 @@ export function parseZip(bytes) {
     if (localOffset + 30 > bytes.length || dv.getUint32(localOffset, true) !== LOCAL_SIG) {
       throw new Error(`parse zip: local header for ${name} missing at offset ${localOffset}`);
     }
-    const dataStart = localOffset + 30 + dv.getUint16(localOffset + 26, true) + dv.getUint16(localOffset + 28, true);
+    const localNameLen = dv.getUint16(localOffset + 26, true);
+    const localName = bytes.subarray(localOffset + 30, localOffset + 30 + localNameLen);
+    if (localNameLen !== nameLen || localName.some((b, i) => b !== nameBytes[i])) {
+      const localShown = decodeName(localName, dv.getUint16(localOffset + 6, true));
+      throw new Error(`parse zip: central directory names "${name}" but its local header names "${localShown}"`);
+    }
+    const dataStart = localOffset + 30 + localNameLen + dv.getUint16(localOffset + 28, true);
     if (dataStart + compSize > bytes.length) throw new Error(`parse zip: data of ${name} overruns file`);
     entries.push({
       name,
@@ -200,12 +206,20 @@ export async function normalizeExtensionZip(bytes) {
     if (prefix === null || candidate.length < prefix.length) prefix = candidate;
   }
   if (prefix === null) throw new Error("normalize extension zip: no manifest.json in any folder");
-  // Strip by bytes: the prefix bytes are those of the manifest's name before "manifest.json".
-  const manifestEntry = entries.find((e) => e.name === prefix + "manifest.json");
-  const prefixBytes = manifestEntry.nameBytes.subarray(0, manifestEntry.nameBytes.length - "manifest.json".length);
-  const startsWith = (b) => b.length > prefixBytes.length && prefixBytes.every((x, i) => b[i] === x);
+  // Entries are selected by decoded name, as entries of one folder may use
+  // different name encodings. Each is stripped of its own prefix bytes: those
+  // up to and including its n-th "/" (0x2f is never part of a multi-byte UTF-8
+  // character or a CP437 character), n being the folder depth of the prefix.
+  const depth = prefix.split("/").length - 1;
   const stripped = entries
-    .filter((e) => e.name.startsWith(prefix) && startsWith(e.nameBytes))
-    .map((e) => ({ ...e, name: e.name.slice(prefix.length), nameBytes: e.nameBytes.slice(prefixBytes.length) }));
+    .filter((e) => e.name.startsWith(prefix) && e.name.length > prefix.length)
+    .map((e) => {
+      let cut = 0;
+      for (let n = 0; n < depth; n++) cut = e.nameBytes.indexOf(0x2f, cut) + 1;
+      if (decodeName(e.nameBytes.subarray(0, cut), e.flags) !== prefix) {
+        throw new Error(`normalize extension zip: cannot strip folder "${prefix}" from the name bytes of "${e.name}"`);
+      }
+      return { ...e, name: e.name.slice(prefix.length), nameBytes: e.nameBytes.slice(cut) };
+    });
   return { bytes: buildZip(stripped), manifest: await readManifest(stripped) };
 }

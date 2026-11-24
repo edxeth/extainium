@@ -33,12 +33,6 @@ test("a backup restores every record and signing key, without the release cache"
   assert.equal(restored.repos[1].extensionId, "fkgkibajhfbepljeaefdnfnegdcjomkh");
 });
 
-test("parseBackup rejects a key that does not derive the stored extension ID", async () => {
-  const zip = await zipRecord();
-  const r = { ...zip.record, extensionId: "a".repeat(32) };
-  await assert.rejects(parseBackup(JSON.stringify(makeBackup([r], { "kaovilai/github-bot-command-palette": zip.pkcs8 }))), /derives ID [a-p]{32}, file says a{32}/);
-});
-
 test("parseBackup rejects files that are not Extainium backups", async () => {
   await assert.rejects(parseBackup("{}"), /not an extainium-backup version 1 or 2 file/);
   await assert.rejects(parseBackup("nope"), /not JSON/);

@@ -13,7 +13,9 @@ Install and update browser extensions from GitHub releases, the way
 - Install or update with one tap. A `.crx` keeps its author's key and extension ID.
   A `.zip` is packed into a CRX signed with a key Extainium creates once per repo,
   so updates keep the same extension ID and its data.
-- Install a local `.crx`/`.zip` and optionally track it with a repo.
+- Install a local `.crx`/`.zip` and optionally track it with a repo. A local `.zip`
+  can be signed with a tracked repo's key; a local `.crx` keeps its author's key and
+  never changes which extension a tracked repo follows.
 - Export/import the list, including the per-repo signing keys. Removing a repo
   keeps its key (it re-attaches if the repo is added again); only "remove and
   uninstall" deletes it. An import never replaces a different stored key.
@@ -24,8 +26,12 @@ Titanium allows off-store CRX installs when the download is started by an
 extension page. Extainium downloads the CRX through `chrome.downloads`; Titanium
 then shows its "Add extension?" prompt. An install counts once the browser reports
 it (`management.onInstalled` with the expected ID and version), not when the
-download finishes. The CRX copy in Downloads is deleted after the install, or two
-minutes after a declined or failed one.
+download finishes. As that event names no particular build, a second, different
+build of the same extension version is refused for two minutes while the first
+may still be at its prompt. The CRX copy in Downloads is deleted after the
+install, or two minutes after a declined or failed one, and never while the
+download is still running. A release or file that would install under another
+extension ID than the installed one waits for your confirmation.
 
 ## Privacy
 

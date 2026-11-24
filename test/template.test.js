@@ -33,6 +33,17 @@ test("matchTemplate: * matches any run, {version} only a version, the rest is li
   assert.ok(!matchTemplate("Ext.zip", "ext.zip"), "literal text is case-sensitive");
 });
 
+// F10: literal text is matched by code points, as the name is read; an emoji
+// (two UTF-16 code units) in the name still matches its derived template.
+test("a template derived from a name with an emoji matches that name", () => {
+  const name = "example-😀-1.2.zip";
+  const t = deriveTemplate(name, "v1.2");
+  assert.equal(t, "example-😀-{version}.zip");
+  assert.ok(matchTemplate(t, name));
+  assert.ok(matchTemplate(t, "example-😀-1.3.zip"));
+  assert.ok(!matchTemplate(t, "example-😁-1.3.zip"));
+});
+
 // The tag's version is replaced only where it is a whole version in the name.
 test("deriveTemplate does not replace the tag's version inside a longer version", () => {
   assert.equal(deriveTemplate("ext-1.10.zip", "v1"), "ext-{version}.zip");
@@ -66,7 +77,15 @@ const pre = fc.option(
 const version = fc.tuple(core, pre).map(([c, p]) => c + p);
 // A word after the version must not start with a pre-release label run ("rc", "a0"),
 // which would make the version part itself ambiguous.
-const word = fc.stringMatching(/^[A-Za-z][A-Za-z0-9]{0,8}$/).filter((w) => !PRERELEASE_LABELS.includes(w.match(/^[A-Za-z]+/)[0].toLowerCase()));
+// F10: words also hold non-ASCII and non-BMP characters (e.g. emoji), which
+// are literal text in a template.
+const wide = fc.integer({ min: 0xa0, max: 0x10ffff })
+  .filter((n) => n < 0xd800 || n > 0xdfff)
+  .map((n) => String.fromCodePoint(n));
+const wordChar = fc.oneof(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"), wide, fc.constantFrom("😀", "𝔘", "é", "中"));
+const word = fc.tuple(fc.oneof(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"), wide), fc.array(wordChar, { maxLength: 8 }))
+  .map(([first, rest]) => first + rest.join(""))
+  .filter((w) => !PRERELEASE_LABELS.includes((w.match(/^[A-Za-z]+/) || [""])[0].toLowerCase()));
 // The prefix must not end with a digit, a letter run glued to the version is fine ("v1.2").
 const prefix = fc.tuple(fc.array(word, { maxLength: 2 }), fc.constantFrom("", "_", "-", "-v", "_v", "v"))
   .map(([ws, end]) => ws.join("-") + (ws.length ? end || "-" : end));

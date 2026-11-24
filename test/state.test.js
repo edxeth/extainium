@@ -5,8 +5,10 @@ import nodeCrypto from "node:crypto";
 import fc from "fast-check";
 import { extensionIdFromCrx } from "../src/lib/crx.js";
 import {
-  addRepo, checkRepo, chooseAsset, exportBackup, importBackup, installRelease, removeRepo, setPrereleases, trackedView,
+  addRepo, checkRepo, chooseAsset, exportBackup, handleExtensionInstalled, importBackup, installFile, installRelease,
+  removeRepo, setPrereleases, trackInstalledFile, trackedView,
 } from "../src/lib/manager.js";
+import { newRecord, parseBackup } from "../src/lib/store.js";
 import { exportedKey, fakeChrome, fakeGithub, v1Backup } from "./helpers/fake-chrome.js";
 
 const zip = new Uint8Array(readFileSync(new URL("./fixtures/ext-root.zip", import.meta.url)));
@@ -182,4 +184,131 @@ test("importing a backup with a different key for a tracked repo keeps the curre
   assert.deepEqual(result.conflicts, [{ key: K, keptId: idOfPkcs8(current), backupId: idOfPkcs8(old) }]);
   const [view] = await trackedView();
   assert.equal(view.record.extensionId, idOfPkcs8(current));
+});
+
+// A v2 backup tracking o/r (no template, not linked) with signing key b64.
+const keyBackup = (b64) => JSON.stringify({
+  format: "extainium-backup", version: 2, exportedAt: "2026-11-24T00:00:00.000Z",
+  repos: [{ owner: "o", repo: "r", template: null, includePrereleases: false, extensionId: null, installed: null, addedAt: 1 }],
+  keys: { [K]: b64 },
+});
+
+// A zip installed from a file with a new key and confirmed by the browser.
+async function installedFromFile(env) {
+  const f = await installFile(zip, "local.zip", null);
+  env.install(f.extensionId, "1.0");
+  await handleExtensionInstalled({ id: f.extensionId, version: "1.0" });
+  return f;
+}
+
+// F1: an import that stores another key for the repo while trackInstalledFile
+// waits for the network check never leaves the record linked to the file's
+// extension without the file's key.
+test("tracking a file install while an import brings another key keeps the file's key with its link", async () => {
+  const env = fakeChrome();
+  fakeGithub([{ tag: "v1", assets: [] }]);
+  const f = await installedFromFile(env);
+  const { promise: entered, resolve: enter } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  const fetch0 = globalThis.fetch;
+  let first = true;
+  globalThis.fetch = async (...args) => {
+    if (first && String(args[0]).startsWith("https://api.github.com/")) { first = false; enter(); await gate; }
+    return fetch0(...args);
+  };
+  const tracking = trackInstalledFile(K, f);
+  await entered;
+  const other = newPkcs8();
+  const result = await importBackup(keyBackup(other));
+  release();
+  await tracking;
+  const rec = env.store["repo:" + K];
+  assert.equal(rec.extensionId, f.extensionId);
+  assert.equal(env.store["key:" + K], f.keyPkcs8, "the key of the linked extension is stored");
+  assert.deepEqual(result.conflicts.map((c) => c.backupId), [idOfPkcs8(other)]);
+});
+
+// F1: an export is one snapshot: a remove-with-uninstall that runs meanwhile
+// never yields a repo without its key.
+test("an export overlapping a remove with uninstall holds a repo only together with its key", async () => {
+  const key = newPkcs8();
+  const id = idOfPkcs8(key);
+  let arm = false;
+  let n = 0;
+  const { promise: entered, resolve: enter } = Promise.withResolvers();
+  const { promise: gate, resolve: release } = Promise.withResolvers();
+  const env = fakeChrome({ extensions: [{ id, version: "1.0", name: "E", enabled: true }], hooks: { async beforeGet(keys) {
+    if (arm && keys === null && ++n === 2) { enter(); await gate; }
+  } } });
+  Object.assign(env.store, { schema: 2, ["repo:" + K]: { ...newRecord("o", "r"), extensionId: id }, ["key:" + K]: key });
+  await trackedView();
+  arm = true;
+  const exporting = exportBackup();
+  await entered;
+  let removed = false;
+  const removing = removeRepo(K, true).then(() => { removed = true; });
+  // Let the removal finish, or wait until it queues behind the export's lock.
+  while (!removed && !(await navigator.locks.query()).pending.length) await new Promise((r) => setImmediate(r));
+  release();
+  const backup = JSON.parse(await exporting);
+  await removing;
+  assert.equal(backup.repos.length === 1, !!backup.keys[K], JSON.stringify({ repos: backup.repos.length, key: !!backup.keys[K] }));
+});
+
+// F1 model of the multi-step operations: whatever order the storage calls of
+// concurrent track-from-file, import (with another key), export and
+// remove-with-uninstall resolve in, a repo linked to the file's extension has
+// the file's key, a repo linked to the imported key's extension has that key,
+// and every export holds the key of each repo linked to one of them.
+test("property: interleaved track/import/export/remove keep each linked ID with its signing key", async () => {
+  const op = fc.constantFrom("track", "import", "export", "remove");
+  const other = newPkcs8();
+  const otherId = idOfPkcs8(other);
+  await fc.assert(
+    fc.asyncProperty(fc.scheduler(), fc.array(op, { minLength: 2, maxLength: 4 }), async (s, ops) => {
+      const env = fakeChrome();
+      fakeGithub([zipRelease("v1")]);
+      const f = await installedFromFile(env);
+      const keyOf = { [f.extensionId]: f.keyPkcs8, [otherId]: other };
+      const local = chrome.storage.local;
+      chrome.storage.local = {
+        get: s.scheduleFunction(local.get),
+        set: s.scheduleFunction(local.set),
+        remove: s.scheduleFunction(local.remove),
+      };
+      // The network is slower than local crypto: a reply takes a few ms of real
+      // time (so key parsing elsewhere can finish meanwhile), then is scheduled.
+      const fetch0 = globalThis.fetch;
+      const scheduledFetch = s.scheduleFunction(fetch0);
+      globalThis.fetch = async (...args) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return scheduledFetch(...args);
+      };
+      const exports = [];
+      const run = {
+        track: () => trackInstalledFile(K, f).catch((e) => {
+          if (!/already tracked|different signing key/.test(e.message)) throw e;
+        }),
+        import: () => importBackup(keyBackup(other)),
+        export: async () => exports.push(await exportBackup()),
+        remove: () => removeRepo(K, true).catch((e) => {
+          if (!/not tracked/.test(e.message)) throw e;
+        }),
+      };
+      const results = await s.waitFor(Promise.allSettled(ops.map((o) => run[o]())));
+      chrome.storage.local = local;
+      globalThis.fetch = fetch0;
+      for (const r of results) if (r.status === "rejected") throw r.reason;
+      const rec = env.store["repo:" + K];
+      if (rec && keyOf[rec.extensionId]) assert.equal(env.store["key:" + K], keyOf[rec.extensionId], "the linked ID's key is stored");
+      for (const text of exports) {
+        const b = JSON.parse(text);
+        for (const r of b.repos) {
+          if (keyOf[r.extensionId]) assert.equal(b.keys[K], keyOf[r.extensionId], "the export holds the linked ID's key");
+        }
+        await parseBackup(text);
+      }
+    }),
+    { numRuns: 60 }
+  );
 });

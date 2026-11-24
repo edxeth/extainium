@@ -87,6 +87,24 @@ test("normalizing a wrapped zip keeps UTF-8 names with the UTF-8 flag", async ()
   assert.equal(entry.flags & 0x800, 0x800);
 });
 
+// F8: one folder, two name encodings (CP437 manifest.json, UTF-8 background.js);
+// Python's reader lists both under "café/". Each entry keeps its own bytes and flag.
+test("normalizing a wrapped zip with mixed name encodings keeps every file of the folder", async () => {
+  const { bytes, manifest } = await normalizeExtensionZip(fixture("wrapped-mixed-encoding.zip"));
+  const entries = parseZip(bytes);
+  assert.deepEqual(entries.map((e) => [e.name, e.flags & 0x800]), [["manifest.json", 0], ["background.js", 0x800]]);
+  assert.equal(manifest.background.service_worker, "background.js");
+});
+
+// F9: Python's reader rejects a local header name that differs from the central directory's.
+test("a zip whose local and central names differ is rejected with an error naming both", async () => {
+  await assert.rejects(normalizeExtensionZip(fixture("local-name-mismatch.zip")), (e) => {
+    assert.match(e.message, /manifest\.json/);
+    assert.match(e.message, /manifest\.jsox/);
+    return true;
+  });
+});
+
 // F9: integrity checks; Python's reader rejects both fixtures.
 test("a zip entry with a wrong CRC-32 is rejected with an error naming the entry", async () => {
   await assert.rejects(normalizeExtensionZip(fixture("bad-crc.zip")), /CRC-32.*manifest\.json|manifest\.json.*CRC-32/);

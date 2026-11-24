@@ -80,4 +80,26 @@ assert bad_size.count((99).to_bytes(4, "little")) >= 2 and bad_size != real
 print("bad-size.zip:", rejects(bad_size, "background.js"))
 write("bad-size.zip", bad_size)
 
+# Wrapped, with mixed name encodings in one folder: manifest.json's name is
+# CP437 (byte 0x82 is "é", UTF-8 flag clear), background.js's name is UTF-8
+# (flag set). Both decode to the folder "café/".
+mixed = build([
+    ("cafX/manifest.json", json.dumps({**MANIFEST, "background": {"service_worker": "background.js"}})),
+    ("café/background.js", "console.log(3);\n"),
+])
+mixed = mixed.replace(b"cafX/manifest.json", b"caf\x82/manifest.json")
+assert names(mixed) == ["café/manifest.json", "café/background.js"], names(mixed)
+with zipfile.ZipFile(io.BytesIO(mixed)) as z:
+    assert [i.flag_bits & 0x800 for i in z.infolist()] == [0, 0x800]
+    for n in z.namelist():
+        z.read(n)
+write("wrapped-mixed-encoding.zip", mixed)
+
+# Root zip whose local header names "manifest.jsox" while the central
+# directory names "manifest.json" (only the first occurrence, the local header).
+name_mismatch = root.replace(b"manifest.json", b"manifest.jsox", 1)
+assert names(name_mismatch)[0] == "manifest.json"
+print("local-name-mismatch.zip:", rejects(name_mismatch, "manifest.json"))
+write("local-name-mismatch.zip", name_mismatch)
+
 print("fixtures written to", HERE)

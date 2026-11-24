@@ -198,7 +198,14 @@ function templateFromOld(record) {
   const digest = record.installed && record.installed.digest;
   for (const rel of Array.isArray(record.releases) ? record.releases : []) {
     const asset = digest && (rel.assets || []).find((a) => a.digest === digest);
-    if (asset) return { template: deriveTemplate(asset.name, rel.tag), error: null };
+    if (!asset) continue;
+    // A name that gives no valid template (e.g. over the length limit) leaves
+    // this record to be chosen again; it must not stop the migration.
+    try {
+      return { template: deriveTemplate(asset.name, rel.tag), error: null };
+    } catch {
+      break;
+    }
   }
   return {
     template: null,
@@ -353,14 +360,8 @@ export async function parseBackup(text) {
       addedAt: r.addedAt ?? Date.now(),
     });
   }
-  // A zip repo's key must derive its stored extension ID.
-  for (const rec of repos) {
-    const b64 = keys[repoKey(rec)];
-    if (!b64 || !rec.extensionId) continue;
-    const id = await extensionIdFromSpki((await importSigningKey(base64Decode(b64))).spki);
-    if (id !== rec.extensionId) {
-      throw new Error(`import backup: ${repoKey(rec)} key derives ID ${id}, file says ${rec.extensionId}`);
-    }
-  }
+  // A key need not derive the repo's extension ID: a retained zip key stays
+  // after an explicit switch to the author's CRX. A pairing that does not fit
+  // the installed extension ends in an identity change at the next link.
   return { repos, keys, warnings };
 }

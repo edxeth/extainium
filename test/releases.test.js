@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fc from "fast-check";
 import {
   compareVersions, deriveTemplate, latestFor, matchAssets, parseRepo,
   selectRelease, simplifyReleases, updateState, versionFromTag,
@@ -42,6 +43,10 @@ test("compareVersions orders numerically with pre-releases before releases", () 
     ["1.77.1b3", "1.77.1b10", -1],
     ["2.0-rc1", "2.0-beta2", 1],
     ["0.0.1", "0.0.0.9", 1],
+    // F12: every dotted number of a pre-release part counts.
+    ["2.0-rc.2.10", "2.0-rc.2.9", 1],
+    ["2.0-rc.2.0", "2.0-rc.2", 0],
+    ["2.0-beta.1.2.3", "2.0-beta.1.2.4", -1],
   ];
   for (const [a, b, want] of cases) {
     assert.equal(compareVersions(a, b), want, `${a} vs ${b}`);
@@ -133,6 +138,62 @@ test("updateState never offers an older release as an update", () => {
   assert.equal(updateState({ latest: stable, installed: null }, ext), "current");
   const beta2 = { tag: "v2.0.0-beta2", asset: { ...asset("ext.crx"), digest: "sha256:beta2" } };
   assert.equal(updateState({ latest: beta2, installed: { tag: "v2.0.0-beta1", digest: "sha256:beta", version: "2.0.0" } }, ext), "update");
+  // F12: a dotted pre-release number decides the order, so 2.9 is not an update over 2.10.
+  const older = { tag: "2.0-rc.2.9", asset: { ...asset("ext.crx"), digest: "sha256:older" } };
+  assert.equal(updateState({ latest: older, installed: { tag: "2.0-rc.2.10", digest: "sha256:newer", version: "2.0" } }, { id: "x", version: "2.0" }), "current");
   const rebuild = { tag: "v2.0.0-beta1", asset: { ...asset("ext.crx"), digest: "sha256:rebuilt" } };
   assert.equal(updateState({ latest: rebuild, installed: { tag: "v2.0.0-beta1", digest: "sha256:beta", version: "2.0.0" } }, ext), "update");
+});
+
+// F15: version ordering against an independent reference. Versions are
+// generated as structures { core, pre: { label, nums } | null } and written out
+// in the forms the grammar accepts; the reference compares the structures as the
+// compareVersions contract says: dotted core numbers (missing = 0), then a
+// pre-release sorts before none, then label text (case-insensitive), then the
+// dotted pre-release numbers (missing = 0).
+const LABEL_LIST = ["alpha", "a", "beta", "b", "pre", "preview", "rc", "dev", "canary", "nightly", "snapshot"];
+// Small numbers and short lists, so that generated versions often share a
+// core and a label and the later parts decide.
+const nums = fc.array(fc.integer({ min: 0, max: 12 }), { minLength: 1, maxLength: 3 });
+const structured = fc.record({
+  core: fc.array(fc.integer({ min: 0, max: 1 }), { minLength: 1, maxLength: 2 }),
+  pre: fc.option(fc.record({ label: fc.oneof(fc.constant("rc"), fc.constantFrom(...LABEL_LIST)), nums: fc.option(nums, { nil: [] }) }), { nil: null }),
+});
+const written = (v) => fc.tuple(fc.constantFrom("", "v"), fc.constantFrom("", "-", "."), fc.constantFrom("", "-", "."), fc.boolean())
+  .map(([lead, s1, s2, upper]) => {
+    let out = lead + v.core.join(".");
+    if (v.pre) {
+      out += s1 + (upper ? v.pre.label.toUpperCase() : v.pre.label);
+      if (v.pre.nums.length) out += s2 + v.pre.nums.join(".");
+    }
+    return out;
+  });
+const versionPair = structured.chain((v) => written(v).map((text) => ({ v, text })));
+
+function cmpNums(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
+}
+function reference(x, y) {
+  const c = cmpNums(x.core, y.core);
+  if (c) return c;
+  if (!x.pre || !y.pre) return x.pre ? -1 : y.pre ? 1 : 0;
+  if (x.pre.label !== y.pre.label) return x.pre.label < y.pre.label ? -1 : 1;
+  return cmpNums(x.pre.nums, y.pre.nums);
+}
+
+test("property: compareVersions agrees with the reference order, is antisymmetric and transitive", () => {
+  fc.assert(
+    fc.property(versionPair, versionPair, versionPair, (a, b, c) => {
+      const ab = compareVersions(a.text, b.text);
+      assert.equal(ab, reference(a.v, b.v), `${a.text} vs ${b.text}`);
+      assert.equal(compareVersions(b.text, a.text), -ab || 0, `antisymmetry ${a.text} ${b.text}`);
+      const bc = compareVersions(b.text, c.text);
+      if (ab <= 0 && bc <= 0) assert.ok(compareVersions(a.text, c.text) <= 0, `transitivity ${a.text} ${b.text} ${c.text}`);
+    }),
+    { numRuns: 2000 }
+  );
 });

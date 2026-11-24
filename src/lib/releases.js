@@ -90,25 +90,32 @@ export function versionFromTag(tag) {
 function parseVersion(v) {
   const s = String(v).trim().replace(/^v/i, "");
   if (scanVersion(s, 0) !== s.length) throw new Error(`compare versions: not a version: "${v}"`);
-  const m = s.match(/^(\d+(?:\.\d+)*)(?:[-.]?([A-Za-z]+)[-.]?(\d*))?/);
+  const m = s.match(/^(\d+(?:\.\d+)*)(?:[-.]?([A-Za-z]+)[-.]?(\d+(?:\.\d+)*)?)?/);
   return {
     core: m[1].split(".").map(Number),
-    pre: m[2] ? { label: m[2].toLowerCase(), n: Number(m[3] || 0) } : null,
+    pre: m[2] ? { label: m[2].toLowerCase(), nums: m[3] ? m[3].split(".").map(Number) : [] } : null,
   };
 }
 
+function compareDotted(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
+}
+
 // Numeric dotted comparison; missing parts count as 0; a suffix such as
-// "b3" or "-rc1" marks a pre-release, which sorts before the plain version.
+// "b3" or "-rc.2.1" marks a pre-release, which sorts before the plain version;
+// pre-releases compare by label, then by every dotted number after it.
 export function compareVersions(a, b) {
   const x = parseVersion(a);
   const y = parseVersion(b);
-  for (let i = 0; i < Math.max(x.core.length, y.core.length); i++) {
-    const d = (x.core[i] || 0) - (y.core[i] || 0);
-    if (d) return Math.sign(d);
-  }
+  const core = compareDotted(x.core, y.core);
+  if (core) return core;
   if (!x.pre || !y.pre) return x.pre ? -1 : y.pre ? 1 : 0;
   if (x.pre.label !== y.pre.label) return x.pre.label < y.pre.label ? -1 : 1;
-  return Math.sign(x.pre.n - y.pre.n);
+  return compareDotted(x.pre.nums, y.pre.nums);
 }
 
 // Throws unless template is a usable template string. Returns it.
@@ -142,11 +149,12 @@ function compileTemplate(template) {
       cur = loop;
       i++;
     } else {
+      // One code point, as runNfa reads the name (an emoji is two UTF-16 units).
       const next = add({});
-      const ch = template[i];
+      const ch = String.fromCodePoint(template.codePointAt(i));
       on(cur, (c) => c === ch, next);
       cur = next;
-      i++;
+      i += ch.length;
     }
   }
   return { states, start, accept: cur };
